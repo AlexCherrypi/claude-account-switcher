@@ -97,6 +97,15 @@ const en = {
   askStay: 'Don’t switch',
   askStayHint: 'Stay on the current account.',
 
+  // Notes
+  noteLine: (note: string, byModel: boolean) => `Note${byModel ? ' (by the model)' : ''}: ${note}`,
+  noteSet: (who: Who) => `Note saved for ${who}.`,
+  noteRemoved: (who: Who) => `Note removed for ${who}.`,
+  toastNoteByModel: (name: string, note: string | null) => `Account: the model ${note ? `set the note on ${name}: ${note}` : `removed the note on ${name}`}`,
+  toastElsewhere: (name: string) => `Account: now on ${name} – switched elsewhere (another session or /login)`,
+  paneNote: 'Note',
+  paneSaveNote: 'Save note',
+
   // The settings pane
   paneTitle: 'Accounts',
   paneHelp: 'Tab / arrows: move · Enter: press · Esc: close',
@@ -118,7 +127,7 @@ const en = {
 
   // /account
   usage:
-    'Usage: /account (the pane) · /account [list|usage|where] · /account allow|ask|block <name> · /account save [label] · /account switch <name> · /account label <name> <label> · /account remove <name> · /account auto on|off|default',
+    'Usage: /account (the pane) · /account [list|usage|where] · /account allow|ask|block <name> · /account note <name> [text] · /account save [label] · /account switch <name> · /account label <name> <label> · /account remove <name> · /account auto on|off|default',
   autoState: (may: boolean) => `The model may switch on its own: ${may ? 'yes' : 'no'}.`,
   autoChanged: (may: boolean) => `The model may switch accounts on its own: ${may ? 'yes' : 'no'}.`,
   failed: (why: string) => `Account switcher: ${why}`,
@@ -233,6 +242,14 @@ const de: Partial<Messages> = {
   askStay: 'Nicht wechseln',
   askStayHint: 'Beim aktuellen Account bleiben.',
 
+  noteLine: (note, byModel) => `Notiz${byModel ? ' (von der KI)' : ''}: ${note}`,
+  noteSet: who => `Notiz für ${who} gespeichert.`,
+  noteRemoved: who => `Notiz für ${who} entfernt.`,
+  toastNoteByModel: (name, note) => `Account: die KI hat ${note ? `die Notiz zu ${name} gesetzt: ${note}` : `die Notiz zu ${name} entfernt`}`,
+  toastElsewhere: name => `Account: jetzt auf ${name} – woanders gewechselt (andere Sitzung oder /login)`,
+  paneNote: 'Notiz',
+  paneSaveNote: 'Notiz speichern',
+
   paneTitle: 'Accounts',
   paneHelp: 'Tab / Pfeile: bewegen · Enter: drücken · Esc: schließen',
   paneReadAnew: 'Limits neu lesen',
@@ -252,7 +269,7 @@ const de: Partial<Messages> = {
   settingsOpened: 'Account-Einstellungen geöffnet: Tab oder Pfeile wechseln den Account, Enter ändert, was die KI darf, Esc schließt.',
 
   usage:
-    'Verwendung: /account (das Fenster) · /account [list|usage|where] · /account allow|ask|block <Name> · /account save [Name] · /account switch <Name> · /account label <Name> <neuer Name> · /account remove <Name> · /account auto on|off|default',
+    'Verwendung: /account (das Fenster) · /account [list|usage|where] · /account allow|ask|block <Name> · /account note <Name> [Text] · /account save [Name] · /account switch <Name> · /account label <Name> <neuer Name> · /account remove <Name> · /account auto on|off|default',
   autoState: may => `Die KI darf von selbst wechseln: ${may ? 'ja' : 'nein'}.`,
   autoChanged: may => `Die KI darf Accounts von selbst wechseln: ${may ? 'ja' : 'nein'}.`,
   failed: why => `Account-Switcher: ${why}`,
@@ -364,6 +381,14 @@ const fr: Partial<Messages> = {
   askStay: 'Ne pas changer',
   askStayHint: 'Rester sur le compte actuel.',
 
+  noteLine: (note, byModel) => `Note${byModel ? ' (par l’IA)' : ''} : ${note}`,
+  noteSet: who => `Note enregistrée pour ${who}.`,
+  noteRemoved: who => `Note supprimée pour ${who}.`,
+  toastNoteByModel: (name, note) => `Compte : l’IA a ${note ? `défini la note de ${name} : ${note}` : `supprimé la note de ${name}`}`,
+  toastElsewhere: name => `Compte : maintenant sur ${name} – changé ailleurs (autre session ou /login)`,
+  paneNote: 'Note',
+  paneSaveNote: 'Enregistrer la note',
+
   paneTitle: 'Comptes',
   paneHelp: 'Tab / flèches : se déplacer · Entrée : appuyer · Échap : fermer',
   paneReadAnew: 'Relire les limites',
@@ -383,7 +408,7 @@ const fr: Partial<Messages> = {
   settingsOpened: 'Réglages des comptes ouverts : Tab ou les flèches changent de compte, Entrée change ce que l’IA peut faire, Échap ferme.',
 
   usage:
-    'Utilisation : /account (le panneau) · /account [list|usage|where] · /account allow|ask|block <nom> · /account save [nom] · /account switch <nom> · /account label <nom> <nouveau nom> · /account remove <nom> · /account auto on|off|default',
+    'Utilisation : /account (le panneau) · /account [list|usage|where] · /account allow|ask|block <nom> · /account note <nom> [texte] · /account save [nom] · /account switch <nom> · /account label <nom> <nouveau nom> · /account remove <nom> · /account auto on|off|default',
   autoState: may => `L’IA peut changer seule : ${may ? 'oui' : 'non'}.`,
   autoChanged: may => `L’IA peut changer de compte seule : ${may ? 'oui' : 'non'}.`,
   failed: why => `Account switcher : ${why}`,

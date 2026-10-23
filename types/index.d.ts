@@ -8,6 +8,9 @@ export type AccountRow = {
   enforced: boolean
   active: boolean
   limits: string
+  // The account's note ('' none) and whether a model wrote it.
+  note: string
+  noteByModel: boolean
 }
 
 declare module 'claude-code' {

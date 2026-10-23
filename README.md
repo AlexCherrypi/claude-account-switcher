@@ -21,6 +21,7 @@ two accounts, each with its own login and limits.
 | `claudeAiOauth` | The login itself: access token, refresh token, expiry, scopes |
 | `lastUsage` | The last 5-hour / 7-day reading |
 | `needsLogin` | Set when its refresh token was refused: sign in with it again |
+| `note`, `noteBy`, `noteAt` | Its note (see [Notes per account](#notes-per-account)), who wrote it (`user` or `model`) and when |
 
 **These files hold your login tokens.** Treat them like passwords: don't sync, share or commit
 them.
@@ -100,6 +101,8 @@ for 3 minutes, and `refresh` reads again (at most every 30 s per account).
   - from the main agent, never a subagent,
   - with a `reason`, which shows in the result and as a toast.
 - `mcp__account-switcher__save` `{ label? }`: saves the account Claude Code is signed in with now.
+- `mcp__account-switcher__note` `{ account, text? }`: reads an account's note, or with `text`
+  replaces it (`""` removes it). You get a toast whenever the model changes a note.
 
 The model also gets a short briefing in its system prompt: when a limit runs high, check the
 other accounts first. If one has room and the model may switch, it switches at a clean point and
@@ -140,6 +143,8 @@ Below that are its buttons:
   The active account has no Remove, because autoSave would save it again at once.
 - **Name**: a text field to rename it. A name another account carries is refused. Mobile draws
   no text fields, so use `/account label` there.
+- **Note**: a text field for its note (empty removes it). The model is told with its next turn.
+  On mobile, use `/account note`.
 
 At the top, **Read limits anew** asks the server for every account's limits. **Tab** or the
 arrows move between the buttons, **Enter** presses one, and **Esc** closes the pane.
@@ -153,6 +158,28 @@ plus the per-account settings. The plugin refuses the model's file tools (Read, 
 commands that name the store. That check is best effort, because a command can name a path in
 many ways. Your own
 `/account switch` never asks. `/account auto off` stops the model switching at all, list or not.
+
+## Notes per account
+
+Each account can carry a note: what you want kept in mind for it, e.g. *weekends only* or
+*7-day at most 60%*. Set it with `/account note <name> <text>` (no text removes it), in the
+pane, or let the model set it with its `note` tool.
+
+A note is a hint, nothing more: the plugin enforces nothing. It is shown wherever the account
+is named – `/account list`, the pane, the model's account list (*Note (by the user): …*), a
+switch's answer, and the message about a switch made elsewhere. The model is told that notes are
+your instructions for that account and that it follows them when it picks an account or
+switches. A note the model wrote is marked *by a model*; your word wins over it.
+
+## Switches made elsewhere
+
+Every switch writes `~/.claude.json` – this plugin in another Claude Code session, a `/login`,
+or a change by hand. The plugin looks at that file's modification time every 10 s (nothing more
+is read while it is unchanged). When it names another account than before, and the change was
+not this session's own switch, the model is told in a message: from which account to which,
+the new account's 5-hour and 7-day limits (read at once), what the model may do there, and its
+note. You get a toast. A stale record another session writes back over the new login is set
+right and not reported.
 
 ## With CTM
 
@@ -185,6 +212,7 @@ organizations. A label another account already carries is refused.
 /account save [label]         save the account signed in now (optionally with a label)
 /account switch <name>        switch (label, email, name, number or uuid; a unique part is enough)
 /account label <name> <label> set or (no label) remove a label
+/account note <name> [text]   set or (no text) remove an account's note
 /account remove <name>        delete an account's file (not the active one)
 /account settings             a pane to manage them: level, switch, rename, remove, read limits
 /account allow <name>         let the model switch to this account on its own

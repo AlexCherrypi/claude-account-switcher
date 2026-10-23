@@ -68,6 +68,14 @@ function world(on: On, opts: WorldOpts = {}) {
     files.set(e.path, e.text)
     return { value: undefined } as never
   })
+  // A file's mtime follows its content: any change of it is a new mtime.
+  on('fs.stat', (_$, e) => {
+    const text = files.get(e.path)
+    if (text === undefined) throw missing(e.path)
+    let mtimeMs = 0
+    for (let i = 0; i < text.length; i++) mtimeMs = (mtimeMs * 31 + text.charCodeAt(i)) >>> 0
+    return { value: { kind: 'file', size: text.length, mtimeMs, isLink: false } } as never
+  })
   const macPaths = ['/usr/bin/security', '/System/Library/CoreServices']
   on('fs.exists', (_$, e) => ({ value: (opts.mac !== undefined && macPaths.includes(e.path)) || files.has(e.path) || [...files.keys()].some(k => k.startsWith(`${e.path}/`)) }) as never)
   on('fs.list', (_$, e) => {
@@ -855,5 +863,98 @@ describe('the model hears of a change in the pane', () => {
     const texts = JSON.stringify(session.appended())
     expect(texts).toContain('[The user changed this in the account settings pane.] The model may no longer switch to private')
     await ui.unmount()
+  })
+})
+
+describe('notes', () => {
+  test('a note is kept, shown to the user and the model everywhere, and set by either', async ($, on) => {
+    const { seen } = world(on)
+    saveB(seen)
+    await $.session.start({ cwd: '/' } as never)
+    expect(await command($, 'note private weekends only, 7-day at most 60%')).toBe('Note saved for private (alice@home.example · Alice).')
+    const b = file(seen, `${STORE}/bbbb-2222.json`)
+    expect(b.note).toBe('weekends only, 7-day at most 60%')
+    expect(b.noteBy).toBe('user')
+    expect(await command($, 'list')).toContain('└ Note: weekends only, 7-day at most 60%')
+    const forModel = String((await call($, 'accounts')).result)
+    expect(forModel).toContain('└ Note (by the user): weekends only, 7-day at most 60%')
+    expect(forModel).toContain('Notes are the user\'s instructions for that account')
+    expect(String((await call($, 'note', { account: 'private' })).result)).toContain('Note (by the user): weekends only')
+    // The model's switch answer names it.
+    expect(String((await call($, 'switch', { account: 'private', reason: 'test' })).result)).toContain('Note (by the user): weekends only')
+    // The model sets one; the user is told.
+    await call($, 'note', { account: 'alice', text: 'work only' })
+    expect(file(seen, `${STORE}/aaaa-1111_org-a.json`).noteBy).toBe('model')
+    expect(seen.toasts).toContain('Account: the model set the note on alice: work only')
+    expect(String((await call($, 'accounts')).result)).toContain('└ Note (by a model): work only')
+    await call($, 'note', { account: 'alice', text: '' })
+    expect(file(seen, `${STORE}/aaaa-1111_org-a.json`).note).toBeUndefined()
+    // A sync keeps the note.
+    await command($, 'save')
+    expect(file(seen, `${STORE}/bbbb-2222.json`).note).toBe('weekends only, 7-day at most 60%')
+    // An empty /account note removes it.
+    expect(await command($, 'note private')).toBe('Note removed for private (alice@home.example · Alice).')
+    expect(file(seen, `${STORE}/bbbb-2222.json`).note).toBeUndefined()
+  })
+
+  test('the pane edits a note and tells the model', { options: { language: 'de' } }, async ($, on) => {
+    const { seen } = world(on)
+    const session = mock.session(on)
+    saveB(seen)
+    await $.session.start({ cwd: '/' } as never)
+    await command($, 'settings')
+    const ui = await $.ui.mount({
+      plugin: 'account-switcher', component: 'Pane', requestId: 'account-switcher', surface: 'terminal',
+      props: { title: 'Accounts', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
+    } as never)
+    await (ui as unknown as { input: (a: unknown) => Promise<unknown> }).input({ key: 'note:bbbb-2222|org-b', text: 'nur am Wochenende' } as never)
+    expect(file(seen, `${STORE}/bbbb-2222.json`).note).toBe('nur am Wochenende')
+    expect(seen.toasts.some(t => t.includes('Notiz für private'))).toBe(true)
+    expect(JSON.stringify(session.appended())).toContain('The note on private (alice@home.example · Alice) is now: nur am Wochenende')
+    await ui.unmount()
+  })
+})
+
+describe('switches made elsewhere', () => {
+  const outsideSwitchToB = (seen: { files: Map<string, string> }) => {
+    seen.files.set(CREDS, JSON.stringify({ claudeAiOauth: tokens('b1'), mcpOAuth: { srv: { token: 'keep-me' } } }))
+    seen.files.set(CONFIG, JSON.stringify({ oauthAccount: ACCOUNT_B, numStartups: 7 }, null, 2))
+  }
+
+  test('another session’s switch is told to the model, with limits, level and note', async ($, on) => {
+    const { seen, clock } = world(on)
+    const session = mock.session(on)
+    saveB(seen)
+    await $.session.start({ cwd: '/' } as never)
+    await command($, 'note private weekends only')
+    await clock.advance(10_000)
+    expect(JSON.stringify(session.appended())).not.toContain('outside this session')
+    outsideSwitchToB(seen)
+    await clock.advance(10_000)
+    const texts = JSON.stringify(session.appended())
+    expect(texts).toContain('changed outside this session\'s own switches')
+    expect(texts).toContain('from alice (alice@work.example · Alice · Work Inc) to private (alice@home.example · Alice)')
+    expect(texts).toContain('Its limits: 5-hour')
+    expect(texts).toContain('Your level there: you may switch here on your own')
+    expect(texts).toContain('Note (by the user): weekends only')
+    expect(seen.toasts.some(t => t.includes('now on private – switched elsewhere'))).toBe(true)
+    // Told once.
+    await clock.advance(30_000)
+    expect(JSON.stringify(session.appended()).split('outside this session').length).toBe(2)
+  })
+
+  test('this session’s own switch is not, nor a stale record another session writes back', async ($, on) => {
+    const { seen, clock } = world(on)
+    const session = mock.session(on)
+    saveB(seen)
+    await $.session.start({ cwd: '/' } as never)
+    await command($, 'switch private')
+    await clock.advance(10_000)
+    // A session that still held A's record writes it back over B's tokens.
+    seen.files.set(CONFIG, JSON.stringify({ oauthAccount: ACCOUNT_A, numStartups: 8 }, null, 2))
+    await clock.advance(10_000)
+    await clock.advance(10_000)
+    expect(file(seen, CONFIG).oauthAccount).toEqual(ACCOUNT_B)
+    expect(JSON.stringify(session.appended())).not.toContain('outside this session')
   })
 })

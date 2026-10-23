@@ -67,6 +67,11 @@ type AccountFile = {
   autoSwitch?: boolean
   // Excluded: the model may not switch to it at all, not even by asking. The user still can.
   modelBlocked?: boolean
+  // What the user (or a model) wants kept in mind for this account, e.g. "weekends only".
+  // A hint only: the plugin shows it everywhere the account is named, it enforces nothing.
+  note?: string
+  noteBy?: 'user' | 'model'
+  noteAt?: string
 }
 
 type Account = { path: string; data: AccountFile }
@@ -91,6 +96,7 @@ type Settings = { allowModelSwitch?: boolean }
 const T_ACCOUNTS = 'mcp__account-switcher__accounts'
 const T_SWITCH = 'mcp__account-switcher__switch'
 const T_SAVE = 'mcp__account-switcher__save'
+const T_NOTE = 'mcp__account-switcher__note'
 
 const API = 'https://api.anthropic.com'
 const TOKEN_URL = 'https://platform.claude.com/v1/oauth/token'
@@ -103,6 +109,7 @@ const USAGE_FRESH_MS = 3 * MINUTE // a reading this young is shown as it is
 const USAGE_DEMAND_GAP_MS = 30_000 // refresh: true, at most this often per account
 const RENEW_MARGIN_MS = 5 * MINUTE // a token this close to its end is renewed first
 const SYNC_EVERY_MS = 5 * MINUTE
+const WATCH_EVERY_MS = 10_000 // how often ~/.claude.json is looked at for a switch made elsewhere
 const LOGIN_LOOKS_MS = [5_000, 15_000, 30_000, 60_000, 2 * MINUTE] // after /login, for the new account
 const HTTP_TIMEOUT_MS = 15_000
 // Past these, an account counts as full (CTM's built-in safety marks).
@@ -121,6 +128,9 @@ let settings: Settings | null = null
 let lastModelSwitchAt = Number.NEGATIVE_INFINITY
 let lastTried = new Map<string, number>() // accountUuid -> last usage fetch
 let syncTimer: { cancel: () => void } | null = null
+let watchTimer: { cancel: () => void } | null = null
+let knownKey: string | null | undefined // the account this session last knew active; undefined: not looked yet
+let configMtime = -1 // ~/.claude.json as last looked at
 let busy: Promise<unknown> = Promise.resolve() // switches and saves run one at a time
 
 // ---------------------------------------------------------------- Small helpers
@@ -461,6 +471,7 @@ function accountFrom(oauthAccount: Record<string, unknown>, tokens: OAuthTokens,
     ...(before?.lastUsage ? { lastUsage: before.lastUsage } : {}),
     ...(before?.autoSwitch ? { autoSwitch: true } : {}),
     ...(before?.modelBlocked ? { modelBlocked: true } : {}),
+    ...(before?.note ? { note: before.note, noteBy: before.noteBy ?? 'user', noteAt: before.noteAt ?? at } : {}),
   }
 }
 
@@ -807,7 +818,7 @@ function levelText(level: Level, lang: Lang): string {
 }
 
 const PANE = 'account-switcher'
-const rows = atom({ plugin: 'account-switcher', key: 'rows' } as const, [] as AccountRow[], { shape: 'rows-1' })
+const rows = atom({ plugin: 'account-switcher', key: 'rows' } as const, [] as AccountRow[], { shape: 'rows-2' })
 const pendingRemove = atom({ plugin: 'account-switcher', key: 'pendingRemove' } as const, '', { shape: 'pending-1' })
 
 // What the pane draws, from the account files (their last readings: no server request).
@@ -827,6 +838,8 @@ async function refreshRows($: EngineInterface): Promise<void> {
     limits:
       (a.data.lastUsage ? fmtLimits(a.data.lastUsage, at, userLang) : msg(userLang, 'limitsNotRead')) +
       (a.data.lastUsage && isFull(a.data.lastUsage, at) ? ` · ${msg(userLang, 'full')}` : ''),
+    note: a.data.note ?? '',
+    noteByModel: a.data.noteBy === 'model',
   }))
   await update($, rows, () => list)
 }
@@ -852,6 +865,27 @@ async function renameAccount($: EngineInterface, account: Account, label: string
   await writeAccount($, account)
   void safe(() => refreshRows($))
   return msg(lang, 'renamed')(describe(account.data))
+}
+
+// Sets an account's note, or removes it where the text is empty.
+async function setNote($: EngineInterface, account: Account, text: string, by: 'user' | 'model'): Promise<void> {
+  const note = text.trim().replace(/\s*\n\s*/g, ' · ')
+  if (note) {
+    account.data.note = note
+    account.data.noteBy = by
+    account.data.noteAt = new Date(await now($)).toISOString()
+  } else {
+    delete account.data.note
+    delete account.data.noteBy
+    delete account.data.noteAt
+  }
+  await writeAccount($, account)
+  void safe(() => refreshRows($))
+}
+
+// The note as the model reads it, in English, with who wrote it.
+function noteForModel(a: AccountFile): string | null {
+  return a.note ? `Note (by ${a.noteBy === 'model' ? 'a model' : 'the user'}): ${a.note}` : null
 }
 
 // Opens the settings pane; false where no surface draws it (a headless run).
@@ -967,6 +1001,8 @@ async function overview($: EngineInterface, { refresh, forModel = false }: { ref
     if (d.needsLogin) detail += ` · ${t('needsLogin')}`
     else if (r.error && r.error !== 'not read yet') detail += ` · ${t('couldNotReadAnew')(r.error)}`
     lines.push(detail)
+    const note = forModel ? noteForModel(d) : d.note ? t('noteLine')(d.note, d.noteBy === 'model') : null
+    if (note) lines.push(`└ ${note}`)
   })
   if (syncError) lines.push(t('couldNotReadLogin')(syncError))
   const best = bestOther(readings, activeUuid, at)
@@ -989,6 +1025,7 @@ async function overview($: EngineInterface, { refresh, forModel = false }: { ref
           'to one marked "model may NOT switch here" never (only the user can, with /account switch).'
       : 'The user has NOT allowed you to switch on your own: suggest a switch to them instead (/account switch <name>).',
   )
+  if (accounts.some(a => a.data.note)) lines.push(NOTES_RULE)
   return lines.join('\n')
 }
 
@@ -1089,6 +1126,7 @@ async function switchTo($: EngineInterface, query: string, how: SwitchBy): Promi
       if (previousDoc) await safe(() => writeBackend($, live.backend, previousDoc))
       throw new Error(t('configFailed')(live.configPath, errorText(err)))
     }
+    knownKey = keyOfFile(target.data) // this session's own switch: not one made elsewhere
     const after = await readLive($)
     if (keyOf(after.oauthAccount) !== keyOfFile(target.data) || after.tokens?.accessToken !== target.data.claudeAiOauth.accessToken) {
       throw new Error(t('didNotHold'))
@@ -1104,6 +1142,7 @@ async function switchTo($: EngineInterface, query: string, how: SwitchBy): Promi
     return [
       t('switched')(from, describe(target.data), how.reason ?? null),
       t('itsLimits')(fmtLimits(reading?.usage ?? null, at, lang), reading?.error ?? null),
+      ...(target.data.note ? [lang === 'en' && how.by === 'model' ? noteForModel(target.data)! : t('noteLine')(target.data.note, target.data.noteBy === 'model')] : []),
       t('sessionsFollow'),
     ].join('\n')
   })
@@ -1116,8 +1155,63 @@ async function switchSummary($: EngineInterface): Promise<string> {
   const key = keyOf(live?.oauthAccount ?? null)
   const account = (await listAccounts($)).find(a => keyOfFile(a.data) === key)
   if (!account) return 'The active account is not in the store.'
-  return `Now active: ${describe(account.data)}. Its limits: ${fmtLimits(account.data.lastUsage ?? null, await now($))}.`
+  const note = noteForModel(account.data)
+  return `Now active: ${describe(account.data)}. Its limits: ${fmtLimits(account.data.lastUsage ?? null, await now($))}.${note ? `\n${note}` : ''}`
 }
+
+function tellModel($: EngineInterface, text: string): Promise<unknown> {
+  return safe(() => $.session.append({ message: { type: 'user', content: [{ type: 'text', text }] } } as never))
+}
+
+function levelForModel(a: AccountFile): string {
+  return a.modelBlocked ? 'you may NOT switch here' : mustAsk(a) || !a.autoSwitch ? 'you ask the user first' : 'you may switch here on your own'
+}
+
+// ~/.claude.json names the active account, and every switch writes it – this session's,
+// another Claude Code session's, a /login. Looked at by its mtime only; where it changed, the
+// login is synced (a stale record written back is set right there) and a new account is
+// told to the model, with its limits, its level and its note.
+async function watchRecord($: EngineInterface): Promise<void> {
+  const path = await globalConfigPath($)
+  if (!path) return
+  const change = await serial(async () => {
+    const stat = await safe(() => $.fs.stat(path))
+    if (!stat || stat.mtimeMs === configMtime) return null
+    configMtime = stat.mtimeMs
+    const synced = await safe(() => syncLive($))
+    const live = synced?.live ?? (await safe(() => readLive($)))
+    if (!live) return null
+    const key = keyOf(live.oauthAccount)
+    const before = knownKey
+    knownKey = key
+    if (before === undefined || key === before || !key) return null
+    return { before, key, live }
+  })
+  if (!change) return
+  const accounts = await listAccounts($)
+  await ensureLabels($, accounts)
+  const from = accounts.find(a => keyOfFile(a.data) === change.before)
+  const to = accounts.find(a => keyOfFile(a.data) === change.key)
+  const fromText = from ? describe(from.data) : change.before ? 'an account not saved' : 'no account'
+  const toText = to ? describe(to.data) : `${str(change.live.oauthAccount?.emailAddress) ?? change.key} (not saved)`
+  const lines = [
+    `[Account switcher] The active Claude account changed outside this session's own switches (another Claude Code session, a /login, or by hand): from ${fromText} to ${toText}. This session runs on it from its next request on.`,
+  ]
+  if (to) {
+    const reading = await usageOf($, to, change.live, true)
+    lines.push(`Its limits: ${fmtLimits(reading.usage, await now($))}${reading.error && reading.error !== 'not read yet' ? ` (could not read anew: ${reading.error})` : ''}.`)
+    lines.push(`Your level there: ${levelForModel(to.data)}.`)
+    const note = noteForModel(to.data)
+    if (note) lines.push(`${note} – ${NOTES_RULE}`)
+  }
+  await tellModel($, lines.join('\n'))
+  toast($, msg(userLang, 'toastElsewhere')(to ? shortName(to.data) : toText))
+  void safe(() => refreshRows($))
+}
+
+const NOTES_RULE =
+  'Notes are the user\'s instructions for that account (e.g. "weekends only", "7-day at most 60%"): follow them when you choose ' +
+  'an account or switch – the plugin does not enforce them, you do. A note by a model is one a model left; the user\'s word wins over it.'
 
 const BRIEFING = [
   '# Account switcher',
@@ -1125,6 +1219,8 @@ const BRIEFING = [
   `- ${T_ACCOUNTS}: the saved accounts (label, email, name, organization, plan), which is active, and each one's 5-hour and 7-day limits – read from the server without switching; refresh=true reads them anew.`,
   `- ${T_SWITCH}: switches to another saved account from your next request on (needs "account" and a short "reason"). Only while the user lets you – ${T_ACCOUNTS} says whether. To an account on the user's allow list ("model may switch here") it switches at once, not more often than the cooldown; to one marked "model asks first" it first asks the user in a dialog and switches only if they confirm – a "no" is final for now, do not ask again right away; to one marked "model may NOT switch here" you may not switch at all – do not try or ask, suggest it to the user if it is the only one with room.`,
   `- ${T_SAVE}: saves the account signed in now (normally that happens on its own).`,
+  `- ${T_NOTE}: reads or sets an account's note. ${NOTES_RULE} Change a note only when the user asks you to or agrees; they are told when you do.`,
+  '- When the active account changes outside your own switches (another Claude Code session, a /login), you are told in a message, with the new account\'s limits, your level there and its note.',
   '- When a limit runs high (CTM\'s blocks show the active account\'s limits; past a pause mark they ask you to pause), check the other accounts first: if one has room and you may switch, switch to it at a clean point and carry on instead of pausing. Prefer the account with the most room that does not reset soon anyway; do not switch back and forth.',
   '- If you may not switch on your own, tell the user which account has room and that /account switch <name> moves there.',
 ].join('\n')
@@ -1147,6 +1243,9 @@ export const register: Register = (on, options) => {
   lastModelSwitchAt = Number.NEGATIVE_INFINITY
   lastTried = new Map()
   syncTimer = null
+  watchTimer = null
+  knownKey = undefined
+  configMtime = -1
   busy = Promise.resolve()
 
   on('session.start', async ($, e, next) => {
@@ -1155,7 +1254,7 @@ export const register: Register = (on, options) => {
       description:
         'Account switcher: lists the saved Claude accounts – label, email, name, organization, plan, which is active – ' +
         'with each one\'s 5-hour and 7-day limits, read from the server without switching (no model request, no tokens), ' +
-        'the account with the most room, and whether you may switch on your own. refresh=true reads the limits anew ' +
+        'each one\'s note (the user\'s instructions for it), the account with the most room, and whether you may switch on your own. refresh=true reads the limits anew ' +
         '(otherwise a reading up to 3 min old is shown).',
       inputSchema: {
         type: 'object',
@@ -1194,11 +1293,28 @@ export const register: Register = (on, options) => {
         additionalProperties: false,
       },
     })
+    await $.tool.register({
+      name: 'note',
+      description:
+        'Account switcher: reads or sets the note on a saved account – what the user wants kept in mind for it, e.g. ' +
+        '"weekends only" or "7-day at most 60%". Notes are instructions for you, not enforced by the plugin; they show in ' +
+        `${T_ACCOUNTS}. Without "text" it reads the note; with "text" it replaces it ("" removes it) – only when the user asks ` +
+        'you to or agrees. The user is told when you change one.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          account: { type: 'string', description: 'The account: its label, email, name, number in the list, or uuid.' },
+          text: { type: 'string', description: 'The new note; "" removes it. Leave out to read it.' },
+        },
+        required: ['account'],
+        additionalProperties: false,
+      },
+    })
     await safe(() =>
       $.command.register({
         name: 'account',
-        description: 'Claude accounts: /account opens the settings pane · list (as text) · switch <name> · allow|ask|block <name> · save [label] · label <name> <label> · remove <name> · auto on|off · where',
-        argumentHint: '[list|settings|switch|allow|ask|block|save|label|remove|auto|where] …',
+        description: 'Claude accounts: /account opens the settings pane · list (as text) · switch <name> · allow|ask|block <name> · note <name> [text] · save [label] · label <name> <label> · remove <name> · auto on|off · where',
+        argumentHint: '[list|settings|switch|allow|ask|block|note|save|label|remove|auto|where] …',
       }),
     )
     await ensureSettings($)
@@ -1208,6 +1324,13 @@ export const register: Register = (on, options) => {
     // Claude Code renews the active account's tokens now and then: keep its file current,
     // so a switch away and back again finds a pair that still works.
     syncTimer = $.clock.every(SYNC_EVERY_MS, () => void safe(() => serial(() => syncLive($))))
+    // Where it stands now: a later change of ~/.claude.json to another account is a switch
+    // made elsewhere.
+    knownKey = keyOf((await safe(() => readLive($)))?.oauthAccount ?? null)
+    const configPath = await globalConfigPath($)
+    configMtime = (configPath ? (await safe(() => $.fs.stat(configPath)))?.mtimeMs : undefined) ?? -1
+    watchTimer?.cancel()
+    watchTimer = $.clock.every(WATCH_EVERY_MS, () => void safe(() => watchRecord($)))
     return next(e)
   })
 
@@ -1228,6 +1351,8 @@ export const register: Register = (on, options) => {
     if (e.reason !== 'clear') {
       syncTimer?.cancel()
       syncTimer = null
+      watchTimer?.cancel()
+      watchTimer = null
     }
     return next(e)
   })
@@ -1318,6 +1443,20 @@ export const register: Register = (on, options) => {
     }
   }).catch(($, e, next) => (next.called ? next(e) : { deny: 'Account switcher: could not save the account.' }))
 
+  on('tool.call', { tool: T_NOTE }, async ($, e) => {
+    const input = e as unknown as { account?: unknown; text?: unknown }
+    const accounts = await listAccounts($)
+    await ensureLabels($, accounts)
+    const found = findAccount(accounts, typeof input.account === 'string' ? input.account : '')
+    if ('error' in found) return { deny: `Account switcher: ${found.error}` }
+    if (typeof input.text !== 'string') {
+      return { result: noteForModel(found.data) ? `${describe(found.data)} – ${noteForModel(found.data)}` : `${describe(found.data)} has no note.` }
+    }
+    await setNote($, found, input.text, 'model')
+    toast($, msg(userLang, 'toastNoteByModel')(shortName(found.data), found.data.note ?? null))
+    return { result: found.data.note ? `Note on ${describe(found.data)} set: ${found.data.note}` : `Note on ${describe(found.data)} removed.` }
+  }).catch(($, e, next) => (next.called ? next(e) : { deny: 'Account switcher: could not read or set the note.' }))
+
   // ---------------------------------------------------------------- The settings pane
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
@@ -1338,7 +1477,7 @@ export const register: Register = (on, options) => {
         else {
           // The model is told, as after /account allow|ask|block.
           const forModel = msg('en', level === 'allow' ? 'nowAllow' : level === 'ask' ? 'nowAsk' : 'nowBlock')(describe(account.data))
-          await safe(() => $.session.append({ message: { type: 'user', content: [{ type: 'text', text: `[The user changed this in the account settings pane.] ${forModel}` }] } } as never))
+          await tellModel($, `[The user changed this in the account settings pane.] ${forModel}`)
         }
       }
       await refreshRows($)
@@ -1349,7 +1488,7 @@ export const register: Register = (on, options) => {
         const text = await switchTo($, row.key, { by: 'person' })
         say(u('paneSwitched')(row.name))
         // The model reads it with its next turn, as it does after /account switch.
-        await safe(() => $.session.append({ message: { type: 'user', content: [{ type: 'text', text: `[The user switched the Claude account in the account settings pane.]\n${text}` }] } } as never))
+        await tellModel($, `[The user switched the Claude account in the account settings pane.]\n${text}`)
       } catch (err) {
         say(errorText(err))
       }
@@ -1365,6 +1504,13 @@ export const register: Register = (on, options) => {
     const rename = (row: AccountRow) => async (value: string) => {
       const account = await find(row.key)
       say(account ? await renameAccount($, account, value, userLang) : u('paneGone'))
+    }
+    const editNote = (row: AccountRow) => async (value: string) => {
+      const account = await find(row.key)
+      if (!account) return say(u('paneGone'))
+      await setNote($, account, value, 'user')
+      say(u(account.data.note ? 'noteSet' : 'noteRemoved')(describe(account.data)))
+      await tellModel($, `[The user changed this in the account settings pane.] ${account.data.note ? `The note on ${describe(account.data)} is now: ${account.data.note}` : `The note on ${describe(account.data)} was removed.`}`)
     }
     const refresh = async () => {
       toast($, u('paneReading'))
@@ -1391,6 +1537,7 @@ export const register: Register = (on, options) => {
               <Text bold>{u('paneModel')(levelText(row.level, userLang), row.enforced && row.level === 'ask')}</Text>
             </Button>
             <Text dimColor>└ {row.limits}</Text>
+            {row.note && <Text>└ {u('noteLine')(row.note, row.noteByModel)}</Text>}
             <Box flexDirection="row">
               {row.active ? (
                 <Text dimColor>{u('paneActive')} </Text>
@@ -1407,6 +1554,7 @@ export const register: Register = (on, options) => {
               )}
             </Box>
             {Input && <Input key={`label:${row.key}`} label={u('paneName')} value={row.name} submitLabel={u('paneRename')} onSubmit={rename(row)} />}
+            {Input && <Input key={`note:${row.key}`} label={u('paneNote')} value={row.note} submitLabel={u('paneSaveNote')} onSubmit={editNote(row)} />}
           </Box>
         ))}
         <Text dimColor>{u('paneLegend')}</Text>
@@ -1474,6 +1622,17 @@ export const register: Register = (on, options) => {
           await writeAccount($, found)
           void safe(() => refreshRows($))
           return { text: t(found.data.label ? 'labelled' : 'labelRemoved')(describe(found.data)) }
+        }
+        case 'note':
+        case 'notes': {
+          const [who = '', ...noteParts] = rest
+          const accounts = await listAccounts($)
+          await ensureLabels($, accounts)
+          const found = findAccount(accounts, who, lang)
+          if ('error' in found) return { text: found.error }
+          await setNote($, found, noteParts.join(' '), 'user')
+          const forModel = found.data.note ? `the note on ${describe(found.data)} is now: ${found.data.note}` : `the note on ${describe(found.data)} was removed`
+          return { text: t(found.data.note ? 'noteSet' : 'noteRemoved')(describe(found.data)), context: [`The user changed this with /account note: ${forModel}. ${NOTES_RULE}`] }
         }
         case 'remove':
         case 'rm':
