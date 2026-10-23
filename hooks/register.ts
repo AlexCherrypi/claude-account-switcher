@@ -785,10 +785,12 @@ async function overview($: EngineInterface, { refresh }: { refresh: boolean }): 
   )
   readings.forEach((r, i) => {
     const d = r.account.data
-    const mark = keyOfFile(d) === activeUuid ? '▶' : ' '
+    // Every line starts with a glyph: Claude Code shifts lines that start with spaces.
+    const mark = keyOfFile(d) === activeUuid ? '▶' : '○'
     const facts = [d.email, d.displayName, d.organizationName, d.subscriptionType].filter(Boolean).join(' · ')
     lines.push(`${mark} ${i + 1}. ${d.label ? `${d.label} – ` : ''}${facts || d.accountUuid}`)
-    let detail = `     ${fmtLimits(r.usage, at)}`
+    let detail = `└ ${fmtLimits(r.usage, at)}`
+    if (r.usage && isFull(r.usage, at)) detail += ' · FULL'
     if (d.needsLogin) detail += ' · NEEDS A NEW LOGIN (its refresh token was refused)'
     else if (r.error && r.error !== 'not read yet') detail += ` · could not read anew: ${r.error}`
     lines.push(detail)
