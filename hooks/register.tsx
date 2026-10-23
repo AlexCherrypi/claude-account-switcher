@@ -1332,8 +1332,14 @@ export const register: Register = (on, options) => {
     const change = (row: AccountRow) => async () => {
       const account = await find(row.key)
       if (account) {
-        const r = await setLevel($, account, nextLevel(levelOf(account.data), mustAsk(account.data)), userLang)
+        const level = nextLevel(levelOf(account.data), mustAsk(account.data))
+        const r = await setLevel($, account, level, userLang)
         if (r.refused) say(r.text)
+        else {
+          // The model is told, as after /account allow|ask|block.
+          const forModel = msg('en', level === 'allow' ? 'nowAllow' : level === 'ask' ? 'nowAsk' : 'nowBlock')(describe(account.data))
+          await safe(() => $.session.append({ message: { type: 'user', content: [{ type: 'text', text: `[The user changed this in the account settings pane.] ${forModel}` }] } } as never))
+        }
       }
       await refreshRows($)
     }

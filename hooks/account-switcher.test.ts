@@ -839,3 +839,21 @@ describe('/account alone', () => {
     expect(await command($, '')).toContain('Accounts: 1 saved · active:')
   })
 })
+
+describe('the model hears of a change in the pane', () => {
+  test('a level changed in the pane is appended for the model, in English', { options: { language: 'de' } }, async ($, on) => {
+    const { seen } = world(on)
+    const session = mock.session(on)
+    saveB(seen, tokens('b1'), false)
+    await $.session.start({ cwd: '/' } as never)
+    await command($, '')
+    const ui = await $.ui.mount({
+      plugin: 'account-switcher', component: 'Pane', requestId: 'account-switcher', surface: 'terminal',
+      props: { title: 'Accounts', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
+    } as never)
+    await ui.press({ key: 'bbbb-2222|org-b' } as never)
+    const texts = JSON.stringify(session.appended())
+    expect(texts).toContain('[The user changed this in the account settings pane.] The model may no longer switch to private')
+    await ui.unmount()
+  })
+})
