@@ -118,7 +118,7 @@ const en = {
 
   // /account
   usage:
-    'Usage: /account [list|usage|settings|where] · /account allow|ask|block <name> · /account save [label] · /account switch <name> · /account label <name> <label> · /account remove <name> · /account auto on|off|default',
+    'Usage: /account (the pane) · /account [list|usage|where] · /account allow|ask|block <name> · /account save [label] · /account switch <name> · /account label <name> <label> · /account remove <name> · /account auto on|off|default',
   autoState: (may: boolean) => `The model may switch on its own: ${may ? 'yes' : 'no'}.`,
   autoChanged: (may: boolean) => `The model may switch accounts on its own: ${may ? 'yes' : 'no'}.`,
   failed: (why: string) => `Account switcher: ${why}`,
@@ -252,7 +252,7 @@ const de: Partial<Messages> = {
   settingsOpened: 'Account-Einstellungen geöffnet: Tab oder Pfeile wechseln den Account, Enter ändert, was die KI darf, Esc schließt.',
 
   usage:
-    'Verwendung: /account [list|usage|settings|where] · /account allow|ask|block <Name> · /account save [Name] · /account switch <Name> · /account label <Name> <neuer Name> · /account remove <Name> · /account auto on|off|default',
+    'Verwendung: /account (das Fenster) · /account [list|usage|where] · /account allow|ask|block <Name> · /account save [Name] · /account switch <Name> · /account label <Name> <neuer Name> · /account remove <Name> · /account auto on|off|default',
   autoState: may => `Die KI darf von selbst wechseln: ${may ? 'ja' : 'nein'}.`,
   autoChanged: may => `Die KI darf Accounts von selbst wechseln: ${may ? 'ja' : 'nein'}.`,
   failed: why => `Account-Switcher: ${why}`,
@@ -383,7 +383,7 @@ const fr: Partial<Messages> = {
   settingsOpened: 'Réglages des comptes ouverts : Tab ou les flèches changent de compte, Entrée change ce que l’IA peut faire, Échap ferme.',
 
   usage:
-    'Utilisation : /account [list|usage|settings|where] · /account allow|ask|block <nom> · /account save [nom] · /account switch <nom> · /account label <nom> <nouveau nom> · /account remove <nom> · /account auto on|off|default',
+    'Utilisation : /account (le panneau) · /account [list|usage|where] · /account allow|ask|block <nom> · /account save [nom] · /account switch <nom> · /account label <nom> <nouveau nom> · /account remove <nom> · /account auto on|off|default',
   autoState: may => `L’IA peut changer seule : ${may ? 'oui' : 'non'}.`,
   autoChanged: may => `L’IA peut changer de compte seule : ${may ? 'oui' : 'non'}.`,
   failed: why => `Account switcher : ${why}`,

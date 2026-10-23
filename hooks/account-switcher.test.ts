@@ -20,6 +20,8 @@ type WorldOpts = {
   mac?: { locked?: boolean; refuseWrites?: number }
   windows?: boolean
   env?: Record<string, string>
+  // No surface draws a pane (a headless run).
+  paneless?: boolean
 }
 
 const LOGIN_A = () => JSON.stringify({ claudeAiOauth: tokens('a1'), mcpOAuth: { srv: { token: 'keep-me' } } })
@@ -146,7 +148,7 @@ function world(on: On, opts: WorldOpts = {}) {
   on('tool.register', (_$, e) => ({ value: { tool: `mcp__account-switcher__${e.name}` } }) as never)
   on('command.register', (_$, e) => ({ value: { command: e.name } }) as never)
   on('session.start', () => ({ cwd: '/' }) as never)
-  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: !opts.paneless } }) as never)
   return { seen, clock }
 }
 
@@ -770,7 +772,7 @@ describe('languages', () => {
     const { seen } = world(on)
     saveB(seen, tokens('b1'), false)
     await $.session.start({ cwd: '/' } as never)
-    const list = await command($, '')
+    const list = await command($, 'list')
     expect(list).toContain('Accounts: 2 gespeichert · aktiv: alice (alice@work.example')
     expect(list).toContain('KI fragt erst')
     expect(list).toMatch(/5-Stunden 91 ?% \(Reset in 2 Std\. 0 Min\.\)/)
@@ -821,5 +823,19 @@ describe('languages', () => {
     world(on, { env: { LANG: 'ja_JP.UTF-8' } })
     await $.session.start({ cwd: '/' } as never)
     expect(await command($, 'auto')).toContain('The model may switch on its own')
+  })
+})
+
+describe('/account alone', () => {
+  test('opens the pane; where nothing draws it, the list', async ($, on) => {
+    world(on)
+    await $.session.start({ cwd: '/' } as never)
+    expect(await command($, '')).toContain('Account settings opened')
+  })
+
+  test('headless: the list', async ($, on) => {
+    world(on, { paneless: true })
+    await $.session.start({ cwd: '/' } as never)
+    expect(await command($, '')).toContain('Accounts: 1 saved · active:')
   })
 })

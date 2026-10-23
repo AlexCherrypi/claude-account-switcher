@@ -854,9 +854,11 @@ async function renameAccount($: EngineInterface, account: Account, label: string
   return msg(lang, 'renamed')(describe(account.data))
 }
 
-async function openPane($: EngineInterface): Promise<void> {
+// Opens the settings pane; false where no surface draws it (a headless run).
+async function openPane($: EngineInterface): Promise<boolean> {
   await refreshRows($)
-  await $.ui.open({ id: PANE, title: msg(userLang, 'paneTitle'), focus: true, closeOnEscape: true })
+  const r = await safe(() => $.ui.open({ id: PANE, title: msg(userLang, 'paneTitle'), focus: true, closeOnEscape: true }))
+  return r?.isPlaced === true
 }
 
 // ---------------------------------------------------------------- Guarding the store
@@ -1195,7 +1197,7 @@ export const register: Register = (on, options) => {
     await safe(() =>
       $.command.register({
         name: 'account',
-        description: 'Claude accounts: /account lists them with their limits · settings (a pane) · switch <name> · allow|ask|block <name> · save [label] · label <name> <label> · remove <name> · auto on|off · where',
+        description: 'Claude accounts: /account opens the settings pane · list (as text) · switch <name> · allow|ask|block <name> · save [label] · label <name> <label> · remove <name> · auto on|off · where',
         argumentHint: '[list|settings|switch|allow|ask|block|save|label|remove|auto|where] …',
       }),
     )
@@ -1427,7 +1429,7 @@ export const register: Register = (on, options) => {
 
   on('command.run', { command: 'account' }, async ($, e) => {
     const args = e.args.trim()
-    const [verb = 'list', ...rest] = args.split(/\s+/).filter(Boolean)
+    const [verb = 'open', ...rest] = args.split(/\s+/).filter(Boolean)
     const tail = rest.join(' ')
     const lang = userLang
     const t = <K extends Parameters<typeof msg>[1]>(key: K) => msg(lang, key)
@@ -1488,6 +1490,9 @@ export const register: Register = (on, options) => {
           const forModel = msg('en', level === 'allow' ? 'nowAllow' : level === 'ask' ? 'nowAsk' : 'nowBlock')(describe(found.data))
           return { text: r.text, context: [`The user changed this with /account ${verb}: ${forModel}`] }
         }
+        // /account alone opens the pane; where nothing can draw it, the list instead.
+        case 'open':
+          return { text: (await openPane($)) ? t('settingsOpened') : await overview($, { refresh: false }) }
         case 'settings':
         case 'ui':
           await openPane($)

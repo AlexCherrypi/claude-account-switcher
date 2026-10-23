@@ -129,7 +129,7 @@ Each account says whether the model may switch to it on its own:
   (`pluginConfigs` → `account-switcher` → `options` → `alwaysAsk`), where neither the user nor the
   model can change it.
 
-**The settings pane.** `/account settings` opens a pane to manage your accounts. Each account
+**The settings pane.** `/account` (or `/account settings`) opens a pane to manage your accounts. Each account
 shows its short name, email, organization and plan, its last limits, and what the model may do.
 Below that are its buttons:
 
@@ -179,7 +179,8 @@ organizations. A label another account already carries is refused.
 ## `/account`
 
 ```
-/account                      list the accounts with their limits (a reading up to 3 min old)
+/account                      open the settings pane (where nothing can draw it, the list)
+/account list                 list the accounts with their limits (a reading up to 3 min old)
 /account usage                the same, every account read anew
 /account save [label]         save the account signed in now (optionally with a label)
 /account switch <name>        switch (label, email, name, number or uuid; a unique part is enough)
