@@ -1,6 +1,6 @@
 {
   "name": "account-switcher",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "description": "Keeps every Claude account you sign in with in a file of its own (tokens, email, name, organization), switches the session to another one on the spot – writing the current account's tokens back first – and reads each account's 5-hour and 7-day limits without switching. The model can do it too, if you let it (on by default), to spread work over your accounts. Works with CTM.",
   "author": {
     "name": "AlexCherrypi"

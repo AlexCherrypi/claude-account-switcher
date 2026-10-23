@@ -109,7 +109,7 @@ const USAGE_FRESH_MS = 3 * MINUTE // a reading this young is shown as it is
 const USAGE_DEMAND_GAP_MS = 30_000 // refresh: true, at most this often per account
 const RENEW_MARGIN_MS = 5 * MINUTE // a token this close to its end is renewed first
 const SYNC_EVERY_MS = 5 * MINUTE
-const WATCH_EVERY_MS = 10_000 // how often ~/.claude.json is looked at for a switch made elsewhere
+const WATCH_EVERY_MS = 1_000 // how often ~/.claude.json is looked at for a switch made elsewhere
 const LOGIN_LOOKS_MS = [5_000, 15_000, 30_000, 60_000, 2 * MINUTE] // after /login, for the new account
 const HTTP_TIMEOUT_MS = 15_000
 // Past these, an account counts as full (CTM's built-in safety marks).

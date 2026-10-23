@@ -174,7 +174,7 @@ switches. A note the model wrote is marked *by a model*; your word wins over it.
 ## Switches made elsewhere
 
 Every switch writes `~/.claude.json` – this plugin in another Claude Code session, a `/login`,
-or a change by hand. The plugin looks at that file's modification time every 10 s (nothing more
+or a change by hand. The plugin looks at that file's modification time every second (nothing more
 is read while it is unchanged). When it names another account than before, and the change was
 not this session's own switch, the model is told in a message: from which account to which,
 the new account's 5-hour and 7-day limits (read at once), what the model may do there, and its
