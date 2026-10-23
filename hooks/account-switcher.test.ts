@@ -582,3 +582,40 @@ describe('the allow list', () => {
     expect(file(seen, `${STORE}/aaaa-1111_org-a.json`).autoSwitch).toBeUndefined()
   })
 })
+
+describe('excluded accounts', () => {
+  test('the model may not switch to a blocked account, not even by asking; the user still can', async ($, on) => {
+    const { seen } = world(on)
+    saveB(seen)
+    await $.session.start({ cwd: '/' } as never)
+    expect(await command($, 'block private')).toContain('may no longer switch to private')
+    const b = file(seen, `${STORE}/bbbb-2222.json`)
+    expect(b.modelBlocked).toBe(true)
+    expect(b.autoSwitch).toBe(false)
+
+    const list = String((await call($, 'accounts')).result)
+    expect(list).toContain('private – alice@home.example · Alice · pro · model may NOT switch here')
+    // It has the most room, but it is not offered to the model.
+    expect(list).not.toContain('Most room elsewhere')
+
+    seen.answer = 'Switch'
+    const r = await call($, 'switch', { account: 'private', reason: 'room' })
+    expect(r.deny).toMatch(/the user has excluded private .* from switches by you.*\/account switch private/)
+    expect(seen.questions).toEqual([])
+    expect(file(seen, CREDS).claudeAiOauth.accessToken).toBe('at-a1')
+
+    expect(await command($, 'switch private')).toContain('Switched')
+    expect(file(seen, CREDS).claudeAiOauth.accessToken).toBe('at-b1')
+  })
+
+  test('/account ask or allow lifts the block', async ($, on) => {
+    const { seen } = world(on)
+    saveB(seen)
+    await command($, 'block private')
+    await command($, 'allow private')
+    const b = file(seen, `${STORE}/bbbb-2222.json`)
+    expect(b.modelBlocked).toBe(false)
+    expect(b.autoSwitch).toBe(true)
+    expect((await call($, 'switch', { account: 'private', reason: 'room' })).deny).toBeUndefined()
+  })
+})

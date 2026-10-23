@@ -116,7 +116,14 @@ Each account says whether the model may switch to it on its own:
   permission mode or auto-mode classifier settles it. If you dismiss the dialog, or nobody can be
   asked (`claude -p`), nothing is switched.
 
-`/account` shows each account as *model may switch here* or *model asks first*. Your own
+- **Excluded** (`/account block <name>`): the model may not switch to it at all, not even by
+  asking. Its `switch` is refused with *"the user has excluded … from switches by you"*, no dialog
+  opens, and the account is never offered to it as the one with the most room. You can still
+  switch there yourself with `/account switch`. `/account ask` or `/account allow` lifts the
+  block.
+
+`/account` shows each account as *model may switch here*, *model asks first* or *model may NOT
+switch here*. Your own
 `/account switch` never asks. `/account auto off` stops the model switching at all, list or not.
 
 ## With CTM
@@ -152,6 +159,7 @@ organizations. A label another account already carries is refused.
 /account remove <name>        delete an account's file (not the active one)
 /account allow <name>         let the model switch to this account on its own
 /account ask <name>           the model asks you before it switches to this account (the default)
+/account block <name>         the model may never switch to this account (you still can)
 /account auto on|off|default  let the model switch at all, or not
 /account where                where this machine keeps the login, and whether it is consistent
 ```

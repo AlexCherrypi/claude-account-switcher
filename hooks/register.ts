@@ -61,6 +61,8 @@ type AccountFile = {
   // On the allow list: the model may switch to it on its own. Otherwise it may only ask,
   // and the user confirms in a dialog the plugin opens.
   autoSwitch?: boolean
+  // Excluded: the model may not switch to it at all, not even by asking. The user still can.
+  modelBlocked?: boolean
 }
 
 type Account = { path: string; data: AccountFile }
@@ -436,6 +438,7 @@ function accountFrom(oauthAccount: Record<string, unknown>, tokens: OAuthTokens,
     claudeAiOauth: tokens,
     ...(before?.lastUsage ? { lastUsage: before.lastUsage } : {}),
     ...(before?.autoSwitch ? { autoSwitch: true } : {}),
+    ...(before?.modelBlocked ? { modelBlocked: true } : {}),
   }
 }
 
@@ -733,7 +736,9 @@ function fmtLimits(u: Usage | null, at: number): string {
 
 // The account with the most room: neither limit near full, the lowest 5-hour use first.
 function bestOther(readings: Reading[], activeUuid: string | null, at: number): Reading | null {
-  const candidates = readings.filter(r => keyOfFile(r.account.data) !== activeUuid && r.usage && !isFull(r.usage, at) && !r.account.data.needsLogin)
+  const candidates = readings.filter(
+    r => keyOfFile(r.account.data) !== activeUuid && r.usage && !isFull(r.usage, at) && !r.account.data.needsLogin && !r.account.data.modelBlocked,
+  )
   candidates.sort((a, b) => {
     const p = (r: Reading, k: LimitKind) => percentNow(limitOf(r.usage, k), at) ?? 0
     return p(a, 'five_hour') - p(b, 'five_hour') || p(a, 'seven_day') - p(b, 'seven_day')
@@ -794,7 +799,7 @@ async function overview($: EngineInterface, { refresh }: { refresh: boolean }): 
     // Every line starts with a glyph: Claude Code shifts lines that start with spaces.
     const mark = keyOfFile(d) === activeUuid ? '▶' : '○'
     const facts = [d.email, d.displayName, d.organizationName, d.subscriptionType].filter(Boolean).join(' · ')
-    const allow = d.autoSwitch ? 'model may switch here' : 'model asks first'
+    const allow = d.modelBlocked ? 'model may NOT switch here' : d.autoSwitch ? 'model may switch here' : 'model asks first'
     lines.push(`${mark} ${i + 1}. ${d.label ? `${d.label} – ` : ''}${facts || d.accountUuid} · ${allow}`)
     let detail = `└ ${fmtLimits(r.usage, at)}`
     if (r.usage && isFull(r.usage, at)) detail += ' · FULL'
@@ -815,7 +820,8 @@ async function overview($: EngineInterface, { refresh }: { refresh: boolean }): 
   lines.push(
     may
       ? `You may switch on your own to accounts marked "model may switch here" (${T_SWITCH}${cooldownMs > 0 ? `, at most every ${cooldownMs / MINUTE} min` : ''}); ` +
-          `to one marked "model asks first", ${T_SWITCH} puts the switch to the user in a dialog and switches only if they confirm.`
+          `to one marked "model asks first", ${T_SWITCH} puts the switch to the user in a dialog and switches only if they confirm; ` +
+          'to one marked "model may NOT switch here" never (only the user can, with /account switch).'
       : 'The user has NOT allowed you to switch on your own: suggest a switch to them instead (/account switch <name>).',
   )
   return lines.join('\n')
@@ -948,7 +954,7 @@ const BRIEFING = [
   '# Account switcher',
   'The user keeps several Claude accounts; the account-switcher plugin can switch this session (and every Claude Code session on this machine) between them in seconds, without a restart.',
   `- ${T_ACCOUNTS}: the saved accounts (label, email, name, organization, plan), which is active, and each one's 5-hour and 7-day limits – read from the server without switching; refresh=true reads them anew.`,
-  `- ${T_SWITCH}: switches to another saved account from your next request on (needs "account" and a short "reason"). Only while the user lets you – ${T_ACCOUNTS} says whether. To an account on the user's allow list ("model may switch here") it switches at once, not more often than the cooldown; to any other it first asks the user in a dialog and switches only if they confirm – a "no" is final for now, do not ask again right away.`,
+  `- ${T_SWITCH}: switches to another saved account from your next request on (needs "account" and a short "reason"). Only while the user lets you – ${T_ACCOUNTS} says whether. To an account on the user's allow list ("model may switch here") it switches at once, not more often than the cooldown; to one marked "model asks first" it first asks the user in a dialog and switches only if they confirm – a "no" is final for now, do not ask again right away; to one marked "model may NOT switch here" you may not switch at all – do not try or ask, suggest it to the user if it is the only one with room.`,
   `- ${T_SAVE}: saves the account signed in now (normally that happens on its own).`,
   '- When a limit runs high (CTM\'s blocks show the active account\'s limits; past a pause mark they ask you to pause), check the other accounts first: if one has room and you may switch, switch to it at a clean point and carry on instead of pausing. Prefer the account with the most room that does not reset soon anyway; do not switch back and forth.',
   '- If you may not switch on your own, tell the user which account has room and that /account switch <name> moves there.',
@@ -1016,8 +1022,8 @@ export const register: Register = (on, options) => {
     await safe(() =>
       $.command.register({
         name: 'account',
-        description: 'Claude accounts: /account lists them with their limits · switch <name> · allow|ask <name> · save [label] · label <name> <label> · remove <name> · auto on|off · where',
-        argumentHint: '[list|switch|allow|ask|save|label|remove|auto|where] …',
+        description: 'Claude accounts: /account lists them with their limits · switch <name> · allow|ask|block <name> · save [label] · label <name> <label> · remove <name> · auto on|off · where',
+        argumentHint: '[list|switch|allow|ask|block|save|label|remove|auto|where] …',
       }),
     )
     await ensureSettings($)
@@ -1079,6 +1085,14 @@ export const register: Register = (on, options) => {
     await ensureLabels($, accounts)
     const target = findAccount(accounts, account)
     if ('error' in target) return { deny: `Account switcher: ${target.error}` }
+    if (target.data.modelBlocked) {
+      return {
+        deny:
+          `Account switcher: the user has excluded ${describe(target.data)} from switches by you – you may not switch there, ` +
+          `and do not ask for it. Only the user can switch there (/account switch ${shortName(target.data)}). ` +
+          'Pick another account, or go on on the current one or pause as CTM asks.',
+      }
+    }
     if (target.data.autoSwitch) {
       const at = await now($)
       if (at - lastModelSwitchAt < cooldownMs) {
@@ -1134,7 +1148,7 @@ export const register: Register = (on, options) => {
     const args = e.args.trim()
     const [verb = 'list', ...rest] = args.split(/\s+/).filter(Boolean)
     const tail = rest.join(' ')
-    const usage = 'Usage: /account [list|usage|where] · /account allow|ask <name> · /account save [label] · /account switch <name> · /account label <name> <label> · /account remove <name> · /account auto on|off|default'
+    const usage = 'Usage: /account [list|usage|where] · /account allow|ask|block <name> · /account save [label] · /account switch <name> · /account label <name> <label> · /account remove <name> · /account auto on|off|default'
     try {
       switch (verb.toLowerCase()) {
         case 'list':
@@ -1184,16 +1198,22 @@ export const register: Register = (on, options) => {
           return { text: `Removed ${describe(found.data)} (its file is gone; its login elsewhere is untouched).` }
         }
         case 'allow':
-        case 'ask': {
+        case 'ask':
+        case 'block': {
           const accounts = await listAccounts($)
           await ensureLabels($, accounts)
           const found = findAccount(accounts, tail)
           if ('error' in found) return { text: found.error }
-          found.data.autoSwitch = verb.toLowerCase() === 'allow'
+          const how = verb.toLowerCase()
+          found.data.autoSwitch = how === 'allow'
+          found.data.modelBlocked = how === 'block'
           await writeAccount($, found)
-          const text = found.data.autoSwitch
-            ? `The model may now switch to ${describe(found.data)} on its own.`
-            : `The model now asks you before it switches to ${describe(found.data)}.`
+          const text =
+            how === 'allow'
+              ? `The model may now switch to ${describe(found.data)} on its own.`
+              : how === 'ask'
+                ? `The model now asks you before it switches to ${describe(found.data)}.`
+                : `The model may no longer switch to ${describe(found.data)} at all, not even by asking. You still can (/account switch).`
           return { text, context: [`The user changed this with /account ${verb}: ${text}`] }
         }
         case 'where':
