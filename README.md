@@ -122,8 +122,21 @@ Each account says whether the model may switch to it on its own:
   switch there yourself with `/account switch`. `/account ask` or `/account allow` lifts the
   block.
 
-`/account` shows each account as *model may switch here*, *model asks first* or *model may NOT
-switch here*. Your own
+- **Asking enforced** (option `alwaysAsk`): a comma-separated list of emails, domains
+  (`@wemotion.io`) or organization names. For a matching account the model always has to ask,
+  whatever the account's own setting says, and `/account allow` is refused for it. Because it is
+  a plugin option, an organization can pin it in managed settings
+  (`pluginConfigs` → `account-switcher` → `options` → `alwaysAsk`), where neither the user nor the
+  model can change it.
+
+`/account` shows each account as *model may switch here*, *model asks first*, *model asks first
+(enforced)* or *model may NOT switch here*.
+
+**The model can't get around it through the files.** The account files hold every saved login,
+plus the per-account settings. The plugin refuses the model's file tools (Read, Write, Edit, Grep,
+…) aimed into the account store, judged by where the path really leads. It also refuses shell
+commands that name the store. That check is best effort, because a command can name a path in
+many ways. Your own
 `/account switch` never asks. `/account auto off` stops the model switching at all, list or not.
 
 ## With CTM
@@ -190,6 +203,7 @@ up elsewhere). Sign in with it again (`/login`), and its file is updated.
 |---|---|---|
 | `allowModelSwitch` | true | The model may switch on its own (`/account auto` overrides it, kept across sessions) |
 | `switchCooldownMinutes` | 5 | Minimum time between two switches by the model, 0 = none |
+| `alwaysAsk` | empty | Emails, `@domains` or organization names the model must always ask for (see [Allow list](#allow-list)) |
 | `autoSave` | true | Save every new account you sign in with on its own. A saved account's file is always kept current as Claude Code renews its tokens (checked every 5 minutes, and at every switch and session end) |
 | `storeDir` | empty | Folder for the account files; empty = `<config dir>/account-switcher/accounts` |
 | `keychainService` | empty | macOS only: the keychain item Claude Code uses, if it isn't the detected one (`Claude Code-credentials`, plus `-<hash>` when `CLAUDE_CONFIG_DIR` is set) |

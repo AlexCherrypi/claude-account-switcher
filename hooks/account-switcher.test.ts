@@ -619,3 +619,48 @@ describe('excluded accounts', () => {
     expect((await call($, 'switch', { account: 'private', reason: 'room' })).deny).toBeUndefined()
   })
 })
+
+describe('alwaysAsk: asking enforced', () => {
+  test('an account on the list is asked for even when allowed, and /account allow is refused', { options: { alwaysAsk: '@home.example' } }, async ($, on) => {
+    const { seen } = world(on)
+    saveB(seen) // autoSwitch: true in its file
+    await $.session.start({ cwd: '/' } as never)
+    expect(String((await call($, 'accounts')).result)).toContain('model asks first (enforced)')
+    expect(await command($, 'allow private')).toContain('is on the always-ask list (option alwaysAsk)')
+
+    seen.answer = 'Don’t switch'
+    expect((await call($, 'switch', { account: 'private', reason: 'room' })).deny).toMatch(/did not confirm/)
+    expect(seen.questions.length).toBe(1)
+    seen.answer = 'Switch'
+    expect((await call($, 'switch', { account: 'private', reason: 'room' })).deny).toBeUndefined()
+    // The user's own switch never asks.
+    expect(await command($, 'switch alice')).toContain('Switched')
+    expect(seen.questions.length).toBe(2)
+  })
+
+  test('organization names and emails match too; others are untouched', { options: { alwaysAsk: 'Work Inc, someone@else.example' } }, async ($, on) => {
+    const { seen } = world(on)
+    saveB(seen)
+    await $.session.start({ cwd: '/' } as never)
+    const list = String((await call($, 'accounts')).result)
+    expect(list).toMatch(/alice – alice@work\.example .* · model asks first \(enforced\)/)
+    expect(list).toMatch(/private – alice@home\.example .* · model may switch here/)
+  })
+})
+
+describe('the store is not the model\'s', () => {
+  test('file tools and shell commands aimed at the account store are refused; others pass', async ($, on) => {
+    const { seen } = world(on)
+    on('tool.call', { tool: ['Read', 'Edit', 'Bash'] }, () => ({ result: 'ran' }) as never)
+    await $.session.start({ cwd: '/' } as never)
+    const read = await $.tool.call({ tool: 'Read', file_path: `${STORE}/aaaa-1111_org-a.json` } as never)
+    expect(read.deny).toMatch(/you may not read or change it directly/)
+    const edit = await $.tool.call({ tool: 'Edit', file_path: `${STORE}/aaaa-1111_org-a.json`, old_string: 'false', new_string: 'true' } as never)
+    expect(edit.deny).toMatch(/may not read or change/)
+    const bash = await $.tool.call({ tool: 'Bash', command: 'cat ~/.claude/account-switcher/accounts/*.json' } as never)
+    expect(bash.deny).toMatch(/may not read or change/)
+    expect((await $.tool.call({ tool: 'Read', file_path: '/home/u/notes.md' } as never)).result).toBe('ran')
+    expect((await $.tool.call({ tool: 'Bash', command: 'ls ~/.claude' } as never)).result).toBe('ran')
+    void seen
+  })
+})

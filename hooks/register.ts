@@ -110,6 +110,7 @@ let cooldownMs = 5 * MINUTE
 let autoSave = true
 let configuredStoreDir = ''
 let configuredKeychain = ''
+let alwaysAsk: string[] = [] // emails, @domains or organization names, lower case
 let settings: Settings | null = null
 let lastModelSwitchAt = Number.NEGATIVE_INFINITY
 let lastTried = new Map<string, number>() // accountUuid -> last usage fetch
@@ -546,6 +547,15 @@ async function ensureLabels($: EngineInterface, accounts: Account[]): Promise<vo
   }
 }
 
+// On the alwaysAsk list (the userConfig option, which managed settings can pin): the model
+// must ask before switching there, whatever the account's own setting says.
+function mustAsk(a: AccountFile): boolean {
+  const email = a.email?.toLowerCase() ?? ''
+  const org = a.organizationName?.toLowerCase() ?? ''
+  const orgId = a.organizationUuid?.toLowerCase() ?? ''
+  return alwaysAsk.some(x => (x.startsWith('@') ? email.endsWith(x) : x === email || x === org || x === orgId))
+}
+
 // A label names one account: refused where another saved account carries it already.
 function labelClash(accounts: Account[], label: string | null, key: string): string | null {
   if (!label) return null
@@ -746,6 +756,43 @@ function bestOther(readings: Reading[], activeUuid: string | null, at: number): 
   return candidates[0] ?? null
 }
 
+// ---------------------------------------------------------------- Guarding the store
+
+const STORE_DENIED =
+  'Account switcher: the account store holds the saved logins (tokens) and the user\'s allow list – you may not ' +
+  'read or change it directly. Use mcp__account-switcher__accounts / __switch / __save; the user has /account.'
+
+function norm(p: string): string {
+  return trimSlash(p.replace(/\\/g, '/')).toLowerCase()
+}
+
+// Where a path really leads (links and .. resolved), or the path as written.
+async function realOf($: EngineInterface, p: string): Promise<string> {
+  const stat = await safe(() => $.fs.stat(p, { resolve: true }))
+  if (stat?.realPath) return stat.realPath
+  // Not there yet (a Write): place it by its folder.
+  const cut = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'))
+  if (cut > 0) {
+    const folder = await safe(() => $.fs.stat(p.slice(0, cut), { resolve: true }))
+    if (folder?.realPath) return `${folder.realPath}/${p.slice(cut + 1)}`
+  }
+  return p
+}
+
+async function insideStore($: EngineInterface, p: string, dir: string): Promise<boolean> {
+  const store = norm(await realOf($, dir))
+  const plain = norm(dir)
+  for (const candidate of [norm(p), norm(await realOf($, p))]) {
+    for (const root of [store, plain]) if (candidate === root || candidate.startsWith(`${root}/`)) return true
+  }
+  return false
+}
+
+function mentionsStore(command: string, dir: string): boolean {
+  const c = command.replace(/\\/g, '/').toLowerCase()
+  return c.includes('account-switcher/accounts') || c.includes(norm(dir))
+}
+
 // ---------------------------------------------------------------- Settings
 
 async function ensureSettings($: EngineInterface): Promise<Settings> {
@@ -799,7 +846,13 @@ async function overview($: EngineInterface, { refresh }: { refresh: boolean }): 
     // Every line starts with a glyph: Claude Code shifts lines that start with spaces.
     const mark = keyOfFile(d) === activeUuid ? '▶' : '○'
     const facts = [d.email, d.displayName, d.organizationName, d.subscriptionType].filter(Boolean).join(' · ')
-    const allow = d.modelBlocked ? 'model may NOT switch here' : d.autoSwitch ? 'model may switch here' : 'model asks first'
+    const allow = d.modelBlocked
+      ? 'model may NOT switch here'
+      : mustAsk(d)
+        ? 'model asks first (enforced)'
+        : d.autoSwitch
+          ? 'model may switch here'
+          : 'model asks first'
     lines.push(`${mark} ${i + 1}. ${d.label ? `${d.label} – ` : ''}${facts || d.accountUuid} · ${allow}`)
     let detail = `└ ${fmtLimits(r.usage, at)}`
     if (r.usage && isFull(r.usage, at)) detail += ' · FULL'
@@ -968,6 +1021,10 @@ export const register: Register = (on, options) => {
   autoSave = options.autoSave !== false
   configuredStoreDir = String(options.storeDir ?? '').trim()
   configuredKeychain = String(options.keychainService ?? '').trim()
+  alwaysAsk = String(options.alwaysAsk ?? '')
+    .split(/[,;\n]/)
+    .map(x => x.trim().toLowerCase())
+    .filter(Boolean)
   settings = null
   lastModelSwitchAt = Number.NEGATIVE_INFINITY
   lastTried = new Map()
@@ -1093,7 +1150,7 @@ export const register: Register = (on, options) => {
           'Pick another account, or go on on the current one or pause as CTM asks.',
       }
     }
-    if (target.data.autoSwitch) {
+    if (target.data.autoSwitch && !mustAsk(target.data)) {
       const at = await now($)
       if (at - lastModelSwitchAt < cooldownMs) {
         return { deny: `Account switcher: you switched ${fmtSpan(lastModelSwitchAt, at)} ago – wait ${fmtSpan(at, lastModelSwitchAt + cooldownMs)} more (no switching back and forth).` }
@@ -1141,6 +1198,23 @@ export const register: Register = (on, options) => {
       return { deny: `Account switcher: ${errorText(err)}` }
     }
   }).catch(($, e, next) => (next.called ? next(e) : { deny: 'Account switcher: could not save the account.' }))
+
+  // ---------------------------------------------------------------- The store is not the model's
+
+  // The account files hold every saved login, and the allow list beside it: the model reads
+  // and changes them only through this plugin. A file tool aimed into the store is refused,
+  // and so is a shell command that names it (best effort: a command can name a path in many
+  // ways; the file tools are checked by where the path really leads).
+  on('tool.call', async ($, e, next) => {
+    const dir = await storeDir($)
+    if (!dir) return next(e)
+    const input = e as unknown as Record<string, unknown>
+    const paths = [input.file_path, input.notebook_path, input.path].filter((p): p is string => typeof p === 'string' && p !== '')
+    for (const p of paths) if (await insideStore($, p, dir)) return { deny: STORE_DENIED }
+    const command = typeof input.command === 'string' ? input.command : ''
+    if (command && mentionsStore(command, dir)) return { deny: STORE_DENIED }
+    return next(e)
+  })
 
   // ---------------------------------------------------------------- /account
 
@@ -1205,6 +1279,13 @@ export const register: Register = (on, options) => {
           const found = findAccount(accounts, tail)
           if ('error' in found) return { text: found.error }
           const how = verb.toLowerCase()
+          if (how === 'allow' && mustAsk(found.data)) {
+            return {
+              text:
+                `${describe(found.data)} is on the always-ask list (option alwaysAsk): the model must ask you before it ` +
+                'switches there, and /account allow cannot lift that. Change the option (or, if your organization set it, ask them).',
+            }
+          }
           found.data.autoSwitch = how === 'allow'
           found.data.modelBlocked = how === 'block'
           await writeAccount($, found)
