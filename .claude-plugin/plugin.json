@@ -1,0 +1,38 @@
+{
+  "name": "account-switcher",
+  "version": "0.1.0",
+  "description": "Keeps every Claude account you sign in with in a file of its own (tokens, email, name, organization), switches the session to another one on the spot – writing the current account's tokens back first – and reads each account's 5-hour and 7-day limits without switching. The model can do it too, if you let it (on by default), to spread work over your accounts. Works with CTM.",
+  "author": { "name": "AlexCherrypi" },
+  "userConfig": {
+    "allowModelSwitch": {
+      "type": "boolean",
+      "title": "Let the model switch accounts",
+      "description": "The model may switch to another saved account on its own, e.g. when a limit runs high. /account auto on|off overrides it.",
+      "default": true
+    },
+    "switchCooldownMinutes": {
+      "type": "number",
+      "title": "Minimum time between two switches by the model (minutes)",
+      "description": "Guards against the model switching back and forth. Your own /account switch is never held back. 0 = none.",
+      "default": 5
+    },
+    "autoSave": {
+      "type": "boolean",
+      "title": "Save every account you sign in with",
+      "description": "An account you /login with is saved to the account store on its own, and the tokens of the active account are written back there whenever Claude Code renews them.",
+      "default": true
+    },
+    "storeDir": {
+      "type": "string",
+      "title": "Account store folder",
+      "description": "Where the account files go, one per account. Empty = <Claude config dir>/account-switcher/accounts.",
+      "default": ""
+    },
+    "keychainService": {
+      "type": "string",
+      "title": "macOS keychain item (advanced)",
+      "description": "The keychain service Claude Code keeps its login under on macOS. Empty = detect (Claude Code-credentials).",
+      "default": ""
+    }
+  }
+}

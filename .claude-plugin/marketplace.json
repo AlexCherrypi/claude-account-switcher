@@ -1,0 +1,6 @@
+{
+  "name": "account-switcher",
+  "description": "Account switcher for Claude Code",
+  "owner": { "name": "AlexCherrypi" },
+  "plugins": [{ "name": "account-switcher", "source": "./" }]
+}
