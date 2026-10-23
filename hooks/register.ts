@@ -365,10 +365,22 @@ function accountUuid(oauthAccount: Record<string, unknown> | null): string | nul
   return str(oauthAccount?.accountUuid)
 }
 
+// What tells two saved accounts apart: the account and the organization it signed in for.
+// One person (one accountUuid, one email) can be in several organizations – a personal plan
+// and a team – each with its own login and limits.
+function keyOf(oauthAccount: Record<string, unknown> | null): string | null {
+  const uuid = accountUuid(oauthAccount)
+  return uuid ? `${uuid}|${str(oauthAccount?.organizationUuid) ?? ''}` : null
+}
+
+function keyOfFile(a: AccountFile): string {
+  return `${a.accountUuid}|${a.organizationUuid ?? ''}`
+}
+
 // ---------------------------------------------------------------- The account store
 
 function describe(a: AccountFile): string {
-  const who = [a.email, a.displayName].filter(Boolean).join(' · ')
+  const who = [a.email, a.displayName, a.organizationName].filter(Boolean).join(' · ')
   return a.label ? `${a.label} (${who || a.accountUuid})` : who || a.accountUuid
 }
 
@@ -401,8 +413,8 @@ async function writeAccount($: EngineInterface, account: Account): Promise<void>
   await restrict($, account.path)
 }
 
-function fileFor(dir: string, uuid: string): string {
-  return `${dir}/${uuid.replace(/[^A-Za-z0-9_-]/g, '_')}.json`
+function fileFor(dir: string, key: string): string {
+  return `${dir}/${key.replace(/\|$/, '').replace(/[^A-Za-z0-9_-]/g, '_')}.json`
 }
 
 function accountFrom(oauthAccount: Record<string, unknown>, tokens: OAuthTokens, at: string, before?: AccountFile): AccountFile {
@@ -435,7 +447,8 @@ async function profileOwner($: EngineInterface, tokens: OAuthTokens): Promise<st
   if (!r?.ok) return null
   try {
     const body = JSON.parse(r.text)
-    return str(body?.account?.uuid)
+    const uuid = str(body?.account?.uuid)
+    return uuid ? `${uuid}|${str(body?.organization?.uuid) ?? ''}` : null
   } catch {
     return null
   }
@@ -448,7 +461,7 @@ async function profileOwner($: EngineInterface, tokens: OAuthTokens): Promise<st
 // ones (Claude Code renewed them, or a new login) are asked of the server.
 async function ownerOf($: EngineInterface, tokens: OAuthTokens, recordUuid: string, accounts: Account[]): Promise<string | null> {
   const known = accounts.find(a => sameTokens(a.data.claudeAiOauth, tokens))
-  if (known) return known.data.accountUuid
+  if (known) return keyOfFile(known.data)
   return (await profileOwner($, tokens)) ?? recordUuid
 }
 
@@ -467,31 +480,36 @@ async function healRecord($: EngineInterface, live: Live, owner: Account): Promi
 // `create` (or autoSave). Answers the account, or null where nothing was saved.
 async function syncLive($: EngineInterface, { create = false, label }: { create?: boolean; label?: string } = {}): Promise<{ account: Account | null; live: Live; created: boolean }> {
   const live = await readLive($)
-  let uuid = accountUuid(live.oauthAccount)
+  let uuid = keyOf(live.oauthAccount)
   if (!uuid || !live.tokens || !live.oauthAccount) return { account: null, live, created: false }
   const accounts = await listAccounts($)
-  const recorded = accounts.find(a => a.data.accountUuid === uuid)
+  const recorded = accounts.find(a => keyOfFile(a.data) === uuid)
   if (!recorded || !sameTokens(recorded.data.claudeAiOauth, live.tokens)) {
     const owner = await ownerOf($, live.tokens, uuid, accounts)
     if (owner && owner !== uuid) {
-      const saved = accounts.find(a => a.data.accountUuid === owner)
+      const saved = accounts.find(a => keyOfFile(a.data) === owner)
       // Tokens of an account never saved, under another's record: nothing to file them under.
       if (!saved) return { account: null, live, created: false }
       await healRecord($, live, saved)
       uuid = owner
     }
   }
-  const existing = accounts.find(a => a.data.accountUuid === uuid)
+  const existing = accounts.find(a => keyOfFile(a.data) === uuid)
   if (!existing && !create && !autoSave) return { account: null, live, created: false }
   const dir = await storeDir($)
   if (!dir) return { account: null, live, created: false }
   const at = new Date(await now($)).toISOString()
   const before = existing?.data
   const data = accountFrom(live.oauthAccount, live.tokens, at, before)
-  if (label !== undefined) data.label = label || null
+  if (label !== undefined) {
+    const clash = labelClash(accounts, label || null, uuid)
+    if (clash) throw new Error(clash)
+    data.label = label || null
+  }
+  if (!data.label) data.label = autoLabel(accounts, data)
   const unchanged =
     before &&
-    label === undefined &&
+    before.label === data.label &&
     JSON.stringify(before.claudeAiOauth) === JSON.stringify(data.claudeAiOauth) &&
     JSON.stringify(before.oauthAccount) === JSON.stringify(data.oauthAccount) &&
     !before.needsLogin
@@ -501,7 +519,34 @@ async function syncLive($: EngineInterface, { create = false, label }: { create?
   return { account, live, created: !existing }
 }
 
-// "work", an email, a name, a uuid (or its start), or the number the list shows.
+// A short name of its own for an account saved without one: the first name, else what
+// stands before the @, lower case; "alex", then "alex-2", "alex-3" where it is taken.
+function autoLabel(accounts: Account[], data: AccountFile): string {
+  const source = data.displayName?.split(/\s+/)[0] || data.email?.split('@')[0] || data.accountUuid.slice(0, 8)
+  const base = source.toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'account'
+  const key = keyOfFile(data)
+  const taken = new Set(accounts.filter(a => keyOfFile(a.data) !== key).map(a => a.data.label?.toLowerCase()))
+  if (!taken.has(base)) return base
+  for (let n = 2; ; n++) if (!taken.has(`${base}-${n}`)) return `${base}-${n}`
+}
+
+// Gives every saved account without a label one (older files, accounts saved elsewhere).
+async function ensureLabels($: EngineInterface, accounts: Account[]): Promise<void> {
+  for (const a of accounts) {
+    if (a.data.label) continue
+    a.data.label = autoLabel(accounts, a.data)
+    await safe(() => writeAccount($, a))
+  }
+}
+
+// A label names one account: refused where another saved account carries it already.
+function labelClash(accounts: Account[], label: string | null, key: string): string | null {
+  if (!label) return null
+  const other = accounts.find(a => keyOfFile(a.data) !== key && a.data.label?.toLowerCase() === label.toLowerCase())
+  return other ? `the label "${label}" is taken by ${describe(other.data)} – pick another, or relabel that one first` : null
+}
+
+// "work", an email, a name, an organization, a uuid (or its start), or the number the list shows.
 function findAccount(accounts: Account[], query: string): Account | { error: string } {
   const q = query.trim().toLowerCase()
   if (!q) return { error: 'name the account: its label, email, name, number in the list, or uuid' }
@@ -509,7 +554,10 @@ function findAccount(accounts: Account[], query: string): Account | { error: str
     const a = accounts[Number(q) - 1]
     if (a) return a
   }
-  const fields = (a: AccountFile) => [a.label, a.email, a.displayName, a.accountUuid].filter((x): x is string => Boolean(x)).map(x => x.toLowerCase())
+  const fields = (a: AccountFile) => [a.label, a.email, a.displayName, a.organizationName, a.accountUuid].filter((x): x is string => Boolean(x)).map(x => x.toLowerCase())
+  // A label names one account: it wins over a name or email that others share.
+  const labelled = accounts.find(a => a.data.label?.toLowerCase() === q)
+  if (labelled) return labelled
   const exact = accounts.filter(a => fields(a.data).includes(q))
   if (exact.length === 1) return exact[0]!
   const loose = accounts.filter(a => fields(a.data).some(f => f.startsWith(q) || f.includes(q)))
@@ -632,12 +680,12 @@ type Reading = { account: Account; usage: Usage | null; error: string | null; fr
 async function usageOf($: EngineInterface, account: Account, live: Live | null, force: boolean): Promise<Reading> {
   const at = await now($)
   const last = account.data.lastUsage
-  const tried = lastTried.get(account.data.accountUuid) ?? Number.NEGATIVE_INFINITY
+  const tried = lastTried.get(keyOfFile(account.data)) ?? Number.NEGATIVE_INFINITY
   const young = last && at - last.at < USAGE_FRESH_MS
   if ((young && !force) || at - tried < USAGE_DEMAND_GAP_MS) {
     return { account, usage: last ?? null, error: last ? null : 'not read yet', fresh: false }
   }
-  lastTried.set(account.data.accountUuid, at)
+  lastTried.set(keyOfFile(account.data), at)
   try {
     const usage = await fetchUsage($, account, live)
     account.data.lastUsage = usage
@@ -679,7 +727,7 @@ function fmtLimits(u: Usage | null, at: number): string {
 
 // The account with the most room: neither limit near full, the lowest 5-hour use first.
 function bestOther(readings: Reading[], activeUuid: string | null, at: number): Reading | null {
-  const candidates = readings.filter(r => r.account.data.accountUuid !== activeUuid && r.usage && !isFull(r.usage, at) && !r.account.data.needsLogin)
+  const candidates = readings.filter(r => keyOfFile(r.account.data) !== activeUuid && r.usage && !isFull(r.usage, at) && !r.account.data.needsLogin)
   candidates.sort((a, b) => {
     const p = (r: Reading, k: LimitKind) => percentNow(limitOf(r.usage, k), at) ?? 0
     return p(a, 'five_hour') - p(b, 'five_hour') || p(a, 'seven_day') - p(b, 'seven_day')
@@ -719,24 +767,25 @@ async function overview($: EngineInterface, { refresh }: { refresh: boolean }): 
     syncError = errorText(err)
   }
   const live = synced?.live ?? null
-  const activeUuid = accountUuid(live?.oauthAccount ?? null)
+  const activeUuid = keyOf(live?.oauthAccount ?? null)
   const accounts = await listAccounts($)
+  await ensureLabels($, accounts)
   const at = await now($)
   const readings: Reading[] = []
   for (const a of accounts) {
-    const isActive = a.data.accountUuid === activeUuid
+    const isActive = keyOfFile(a.data) === activeUuid
     readings.push(await usageOf($, a, isActive ? live : null, refresh))
   }
   const lines: string[] = []
-  const active = accounts.find(a => a.data.accountUuid === activeUuid)
+  const active = accounts.find(a => keyOfFile(a.data) === activeUuid)
   lines.push(
     `Accounts: ${accounts.length} saved · active: ${
-      active ? describe(active.data) : activeUuid ? `${str(live?.oauthAccount?.emailAddress) ?? activeUuid} (not saved – /account save)` : 'none (not signed in with a claude.ai account)'
+      active ? describe(active.data) : activeUuid ? `${str(live?.oauthAccount?.emailAddress) ?? accountUuid(live?.oauthAccount ?? null)} (not saved – /account save)` : 'none (not signed in with a claude.ai account)'
     }`,
   )
   readings.forEach((r, i) => {
     const d = r.account.data
-    const mark = d.accountUuid === activeUuid ? '▶' : ' '
+    const mark = keyOfFile(d) === activeUuid ? '▶' : ' '
     const facts = [d.email, d.displayName, d.organizationName, d.subscriptionType].filter(Boolean).join(' · ')
     lines.push(`${mark} ${i + 1}. ${d.label ? `${d.label} – ` : ''}${facts || d.accountUuid}`)
     let detail = `     ${fmtLimits(r.usage, at)}`
@@ -784,11 +833,13 @@ async function whereReport($: EngineInterface): Promise<string> {
             ? ''
             : ' – but it holds no claude.ai tokens (an API key, a cloud provider, or not signed in)'),
     )
-    const uuid = accountUuid(live.oauthAccount)
-    lines.push(`Account record names: ${uuid ? `${str(live.oauthAccount?.emailAddress) ?? '?'} (${uuid})` : 'no account'}`)
+    const uuid = keyOf(live.oauthAccount)
+    lines.push(
+      `Account record names: ${uuid ? `${str(live.oauthAccount?.emailAddress) ?? '?'} (account ${accountUuid(live.oauthAccount)}, organization ${str(live.oauthAccount?.organizationUuid) ?? '?'})` : 'no account'}`,
+    )
     if (live.tokens && uuid) {
       const accounts = await listAccounts($)
-      const saved = accounts.find(a => a.data.accountUuid === uuid)
+      const saved = accounts.find(a => keyOfFile(a.data) === uuid)
       lines.push(
         saved
           ? `Saved in the store: yes – ${describe(saved.data)}, last written ${saved.data.updatedAt} (${saved.path})`
@@ -796,7 +847,12 @@ async function whereReport($: EngineInterface): Promise<string> {
       )
       lines.push(`Accounts in the store: ${accounts.length}${accounts.length ? ` (${accounts.map(a => shortName(a.data)).join(', ')})` : ''}`)
       const owner = await ownerOf($, live.tokens, uuid, accounts)
-      lines.push(owner === uuid ? 'Tokens and record agree.' : `Tokens belong to ${owner} – the record names another account (the next sync sets it right where that account is saved).`)
+      const ownerFile = accounts.find(a => keyOfFile(a.data) === owner)
+      lines.push(
+        owner === uuid
+          ? 'Tokens and record agree.'
+          : `Tokens belong to ${ownerFile ? describe(ownerFile.data) : `another account or organization (${owner})`} – the record names another (the next sync sets it right where that one is saved).`,
+      )
     }
   } catch (err) {
     lines.push(`Could not read the login: ${errorText(err)}`)
@@ -809,12 +865,13 @@ type SwitchBy = { by: 'model' | 'person'; reason?: string }
 async function switchTo($: EngineInterface, query: string, how: SwitchBy): Promise<string> {
   return serial(async () => {
     const { account: current, live } = await syncLive($)
-    const fromUuid = accountUuid(live.oauthAccount)
+    const fromUuid = keyOf(live.oauthAccount)
     const accounts = await listAccounts($)
+    await ensureLabels($, accounts)
     const found = findAccount(accounts, query)
     if ('error' in found) throw new Error(found.error)
     const target = found
-    if (target.data.accountUuid === fromUuid) return `Already on ${describe(target.data)} – nothing to switch.`
+    if (keyOfFile(target.data) === fromUuid) return `Already on ${describe(target.data)} – nothing to switch.`
     // A login with no tokens in it (signed out, or broken) has nothing to lose: switching repairs it.
     if (fromUuid && !current && live.tokens) {
       throw new Error(
@@ -859,7 +916,7 @@ async function switchTo($: EngineInterface, query: string, how: SwitchBy): Promi
       throw new Error(`could not update ${live.configPath} (${errorText(err)}) – the old login is back in place`)
     }
     const after = await readLive($)
-    if (accountUuid(after.oauthAccount) !== target.data.accountUuid || after.tokens?.accessToken !== target.data.claudeAiOauth.accessToken) {
+    if (keyOf(after.oauthAccount) !== keyOfFile(target.data) || after.tokens?.accessToken !== target.data.claudeAiOauth.accessToken) {
       throw new Error('the switch did not hold – something else wrote the login at the same time; check with /account')
     }
     const at = await now($)
@@ -1062,7 +1119,10 @@ export const register: Register = (on, options) => {
           const accounts = await listAccounts($)
           const found = findAccount(accounts, who)
           if ('error' in found) return { text: found.error }
-          found.data.label = labelParts.join(' ').trim() || null
+          const label = labelParts.join(' ').trim() || null
+          const clash = labelClash(accounts, label, keyOfFile(found.data))
+          if (clash) return { text: clash }
+          found.data.label = label
           await writeAccount($, found)
           return { text: `${found.data.label ? 'Labelled' : 'Label removed:'} ${describe(found.data)}.` }
         }
@@ -1073,7 +1133,7 @@ export const register: Register = (on, options) => {
           const found = findAccount(accounts, tail)
           if ('error' in found) return { text: found.error }
           const live = await safe(() => readLive($))
-          if (live && accountUuid(live.oauthAccount) === found.data.accountUuid && autoSave) {
+          if (live && keyOf(live.oauthAccount) === keyOfFile(found.data) && autoSave) {
             return { text: `${describe(found.data)} is the active account and would be saved again at once (autoSave). Switch away first.` }
           }
           const argv = (await isWindows($)) ? ['cmd', '/c', 'del', '/f', '/q', found.path.replace(/\//g, '\\')] : ['rm', '-f', found.path]

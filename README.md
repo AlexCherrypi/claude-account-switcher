@@ -8,12 +8,14 @@ with room when the active one runs out. It works together with [CTM](https://git
 
 ## What it keeps
 
-One JSON file per account, in `<Claude config dir>/account-switcher/accounts/<accountUuid>.json`
-(`~/.claude/account-switcher/accounts/` by default, readable by you alone):
+One JSON file per account, in `<Claude config dir>/account-switcher/accounts/<accountUuid>_<organizationUuid>.json`
+(`~/.claude/account-switcher/accounts/` by default, readable by you alone). An account is the
+person **and** the organization it signed in for: one email in a personal plan and in a team is
+two accounts, each with its own login and limits.
 
 | Field | What |
 |---|---|
-| `label` | Your own name for it (`work`, `private`, …), set with `/account save <label>` or `/account label` |
+| `label` | Its short name, unique among your accounts. It is given automatically: the first name (or what stands before the @), lower case, with `-2`, `-3` behind it where taken (`alex`, `alex-2`). Change it with `/account label <name> <new>` |
 | `email`, `displayName`, `organizationName`, `organizationUuid`, `subscriptionType` | Who it is, to tell the accounts apart |
 | `oauthAccount` | The account record Claude Code keeps in `~/.claude.json` |
 | `claudeAiOauth` | The login itself: access token, refresh token, expiry, scopes |
@@ -109,6 +111,19 @@ carries on instead of pausing. If it may not, it tells you which account has roo
 - When a block asks the model to pause (your pause threshold or CTM's built-in safety net), CTM
   first points it to `mcp__account-switcher__accounts` / `…__switch`. It does so only where this
   plugin is installed, and only for the main agent.
+
+## Names
+
+You name an account in `/account switch` and the model names it in its `switch` tool. Both
+accept any of these:
+
+1. its **label** (`alex-2`): unique, and it always wins
+2. its email, display name or organization name, if exactly one account has it
+3. a unique part of any of these (`wemotion`, `club`)
+4. its number in `/account`'s list, or its uuid
+
+If a name fits several accounts, nothing is switched and the answer lists them with their
+organizations. A label another account already carries is refused.
 
 ## `/account`
 

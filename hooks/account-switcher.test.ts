@@ -36,8 +36,8 @@ function world(on: On, opts: WorldOpts = {}) {
   const seen = {
     files,
     keychain,
-    // access token -> the account uuid the profile endpoint names
-    profiles: new Map<string, string>(),
+    // access token -> the account and organization the profile endpoint names
+    profiles: new Map<string, { accountUuid: string; organizationUuid: string }>(),
     usage: new Map<string, { five_hour: number; seven_day: number }>([
       ['at-a1', { five_hour: 91, seven_day: 40 }],
       ['session', { five_hour: 91, seven_day: 40 }],
@@ -115,8 +115,8 @@ function world(on: On, opts: WorldOpts = {}) {
     }
     if (e.url.endsWith('/api/oauth/profile')) {
       const token = String(e.init?.headers?.Authorization ?? '').replace(/^Bearer /, '')
-      const uuid = seen.profiles.get(token)
-      return uuid ? answer(200, { account: { uuid, email: 'x' }, organization: { uuid: 'o' } }) : answer(401, {})
+      const who = seen.profiles.get(token)
+      return who ? answer(200, { account: { uuid: who.accountUuid, email: 'x' }, organization: { uuid: who.organizationUuid } }) : answer(401, {})
     }
     if (e.url.endsWith('/api/oauth/usage')) {
       const key = e.init?.auth ?? String(e.init?.headers?.Authorization ?? '').replace(/^Bearer /, '')
@@ -176,20 +176,20 @@ describe('saving', () => {
   test('saves the account signed in now on its own, with who it is', async ($, on) => {
     const { seen } = world(on)
     await $.session.start({ cwd: '/' } as never)
-    const a = file(seen, `${STORE}/aaaa-1111.json`)
+    const a = file(seen, `${STORE}/aaaa-1111_org-a.json`)
     expect(a.email).toBe('alice@work.example')
     expect(a.displayName).toBe('Alice')
     expect(a.organizationName).toBe('Work Inc')
     expect(a.subscriptionType).toBe('max')
     expect(a.claudeAiOauth.refreshToken).toBe('rt-a1')
     expect(a.oauthAccount).toEqual(ACCOUNT_A)
-    expect(seen.commands).toContainEqual(['chmod', '600', `${STORE}/aaaa-1111.json`])
+    expect(seen.commands).toContainEqual(['chmod', '600', `${STORE}/aaaa-1111_org-a.json`])
   })
 
   test('/account save takes a label', async ($, on) => {
     const { seen } = world(on)
     expect(await command($, 'save work')).toContain('work (alice@work.example')
-    expect(file(seen, `${STORE}/aaaa-1111.json`).label).toBe('work')
+    expect(file(seen, `${STORE}/aaaa-1111_org-a.json`).label).toBe('work')
   })
 })
 
@@ -199,8 +199,8 @@ describe('limits without switching', () => {
     saveB(seen)
     const r = await call($, 'accounts')
     const text = String(r.result)
-    expect(text).toContain('active: alice@work.example')
-    expect(text).toMatch(/▶ \d\. alice@work\.example/)
+    expect(text).toContain('active: alice (alice@work.example · Alice · Work Inc)')
+    expect(text).toMatch(/▶ \d\. alice – alice@work\.example/)
     expect(text).toContain('5-hour 91% (resets in 2 h 0 min) · 7-day 40%')
     expect(text).toContain('private – alice@home.example')
     expect(text).toContain('5-hour 12%')
@@ -239,7 +239,7 @@ describe('switching', () => {
 
     const r = await call($, 'switch', { account: 'private', reason: '5-hour limit at 91%' })
     expect(r.deny).toBeUndefined()
-    expect(String(r.result)).toContain('Switched from alice@work.example')
+    expect(String(r.result)).toContain('Switched from alice (alice@work.example')
     expect(String(r.result)).toContain('to private')
 
     const creds = file(seen, CREDS)
@@ -249,7 +249,7 @@ describe('switching', () => {
     expect(config.oauthAccount).toEqual(ACCOUNT_B)
     expect(config.numStartups).toBe(7)
     expect(config.projects).toEqual({ '/x': {} })
-    expect(file(seen, `${STORE}/aaaa-1111.json`).claudeAiOauth.accessToken).toBe('at-a2')
+    expect(file(seen, `${STORE}/aaaa-1111_org-a.json`).claudeAiOauth.accessToken).toBe('at-a2')
     expect(seen.toasts.some(t => t.includes('switched to private'))).toBe(true)
 
     // And back: the person's own switch, by a part of the email.
@@ -262,7 +262,7 @@ describe('switching', () => {
   test('says so when the target is already active', async ($, on) => {
     const { seen } = world(on)
     await $.session.start({ cwd: '/' } as never)
-    expect(seen.files.has(`${STORE}/aaaa-1111.json`)).toBe(true)
+    expect(seen.files.has(`${STORE}/aaaa-1111_org-a.json`)).toBe(true)
     expect(String((await call($, 'switch', { account: 'alice@work', reason: 'test' })).result)).toContain('Already on')
   })
 
@@ -324,8 +324,8 @@ describe('/account', () => {
     const { seen } = world(on)
     saveB(seen)
     await $.session.start({ cwd: '/' } as never)
-    expect(await command($, 'switch alice')).toContain('fits 2 accounts')
-    expect(await command($, 'switch bob')).toContain('no saved account fits "bob" (saved: private, alice@work.example)')
+    expect(await command($, 'switch example')).toContain('fits 2 accounts')
+    expect(await command($, 'switch bob')).toContain('no saved account fits "bob" (saved: private, alice)')
     expect(await command($, 'switch 1')).toContain('Switched')
   })
 })
@@ -335,7 +335,7 @@ describe('macOS: the login in the keychain, the account record in ~/.claude.json
     const { seen } = world(on, { mac: {} })
     saveB(seen)
     await $.session.start({ cwd: '/' } as never)
-    expect(file(seen, `${STORE}/aaaa-1111.json`).claudeAiOauth.accessToken).toBe('at-a1')
+    expect(file(seen, `${STORE}/aaaa-1111_org-a.json`).claudeAiOauth.accessToken).toBe('at-a1')
     const r = await call($, 'switch', { account: 'private', reason: 'room' })
     expect(r.deny).toBeUndefined()
     const item = JSON.parse(seen.keychain.get('Claude Code-credentials')!)
@@ -354,7 +354,7 @@ describe('macOS: the login in the keychain, the account record in ~/.claude.json
     const r = await call($, 'switch', { account: 'private', reason: 'room' })
     expect(r.deny).toMatch(/could not read the macOS keychain item "Claude Code-credentials".*unlocked/)
     expect(file(seen, CREDS).claudeAiOauth.accessToken).toBe('at-stale')
-    expect(seen.files.has(`${STORE}/aaaa-1111.json`)).toBe(false)
+    expect(seen.files.has(`${STORE}/aaaa-1111_org-a.json`)).toBe(false)
   })
 
   test('no keychain item: the file, as Claude Code does', async ($, on) => {
@@ -384,12 +384,12 @@ describe('Windows', () => {
     seen.files.set('/win/Users/u/.claude.json', seen.files.get(CONFIG)!)
     seen.files.delete(CONFIG)
     await $.session.start({ cwd: '/' } as never)
-    expect(seen.files.has('/win/Users/u/.claude/account-switcher/accounts/aaaa-1111.json')).toBe(true)
+    expect(seen.files.has('/win/Users/u/.claude/account-switcher/accounts/aaaa-1111_org-a.json')).toBe(true)
     expect(seen.commands.some(c => c[0] === 'chmod')).toBe(false)
     const where = await command($, 'where')
     expect(where).toContain('System: Windows')
-    expect(where).toContain('Saved in the store: yes – alice@work.example')
-    expect(where).toContain('Accounts in the store: 1 (alice@work.example)')
+    expect(where).toContain('Saved in the store: yes – alice (alice@work.example')
+    expect(where).toContain('Accounts in the store: 1 (alice)')
   })
 })
 
@@ -404,7 +404,7 @@ describe('tokens and record kept apart', () => {
     const text = String((await call($, 'accounts')).result)
     expect(file(seen, CONFIG).oauthAccount).toEqual(ACCOUNT_B)
     expect(file(seen, CONFIG).numStartups).toBe(8)
-    expect(file(seen, `${STORE}/aaaa-1111.json`).claudeAiOauth.accessToken).toBe('at-a1')
+    expect(file(seen, `${STORE}/aaaa-1111_org-a.json`).claudeAiOauth.accessToken).toBe('at-a1')
     expect(text).toContain('active: private')
   })
 
@@ -414,10 +414,10 @@ describe('tokens and record kept apart', () => {
     await $.session.start({ cwd: '/' } as never)
     // Claude Code renewed B's tokens, but the record still names A.
     seen.files.set(CREDS, JSON.stringify({ claudeAiOauth: tokens('b9') }))
-    seen.profiles.set('at-b9', ACCOUNT_B.accountUuid)
+    seen.profiles.set('at-b9', ACCOUNT_B)
     expect(String(await command($, 'save'))).toContain('private')
     expect(file(seen, `${STORE}/bbbb-2222.json`).claudeAiOauth.accessToken).toBe('at-b9')
-    expect(file(seen, `${STORE}/aaaa-1111.json`).claudeAiOauth.accessToken).toBe('at-a1')
+    expect(file(seen, `${STORE}/aaaa-1111_org-a.json`).claudeAiOauth.accessToken).toBe('at-a1')
     expect(file(seen, CONFIG).oauthAccount).toEqual(ACCOUNT_B)
   })
 })
@@ -436,20 +436,23 @@ describe('/login', () => {
     await $.session.start({ cwd: '/' } as never)
     // Claude Code renewed A's tokens since the last sync.
     seen.files.set(CREDS, JSON.stringify({ claudeAiOauth: tokens('a2'), mcpOAuth: { srv: { token: 'keep-me' } } }))
-    seen.profiles.set('at-a2', ACCOUNT_A.accountUuid)
-    seen.profiles.set('at-c1', ACCOUNT_C.accountUuid)
+    seen.profiles.set('at-a2', ACCOUNT_A)
+    seen.profiles.set('at-c1', ACCOUNT_C)
     await $.command.run({ command: 'login', args: '' } as never)
-    expect(file(seen, `${STORE}/aaaa-1111.json`).claudeAiOauth.accessToken).toBe('at-a2')
+    expect(file(seen, `${STORE}/aaaa-1111_org-a.json`).claudeAiOauth.accessToken).toBe('at-a2')
     expect(loginAt).toBeGreaterThan(0)
     await clock.advance(10_000)
     seen.files.set(CREDS, JSON.stringify({ claudeAiOauth: tokens('c1'), mcpOAuth: { srv: { token: 'keep-me' } } }))
     seen.files.set(CONFIG, JSON.stringify({ oauthAccount: ACCOUNT_C, numStartups: 7 }, null, 2))
     await clock.advance(6_000)
-    const c = file(seen, `${STORE}/cccc-3333.json`)
+    const c = file(seen, `${STORE}/cccc-3333_org-c.json`)
     expect(c.email).toBe('alice@club.example')
     expect(c.claudeAiOauth.accessToken).toBe('at-c1')
-    expect(file(seen, `${STORE}/aaaa-1111.json`).claudeAiOauth.accessToken).toBe('at-a2')
-    expect(String((await call($, 'accounts')).result)).toContain('Accounts: 2 saved · active: alice@club.example')
+    expect(file(seen, `${STORE}/aaaa-1111_org-a.json`).claudeAiOauth.accessToken).toBe('at-a2')
+    seen.usage.set('at-a2', { five_hour: 91, seven_day: 40 })
+    const text = String((await call($, 'accounts')).result)
+    expect(text).toContain('Accounts: 2 saved · active: alice-2 (alice@club.example · Alice)')
+    expect(text).toContain('1. alice – alice@work.example')
   })
 })
 
@@ -489,5 +492,36 @@ describe('a broken login', () => {
     expect(await command($, 'switch private')).toContain('Switched')
     expect(JSON.parse(seen.keychain.get('Claude Code-credentials')!).claudeAiOauth.accessToken).toBe('at-b1')
     expect(file(seen, CONFIG).oauthAccount).toEqual(ACCOUNT_B)
+  })
+})
+
+describe('names', () => {
+  test('one person in two organizations: two accounts, each with a short name of its own', async ($, on) => {
+    const { seen } = world(on)
+    await $.session.start({ cwd: '/' } as never)
+    // The same person signs in for a team: same account, another organization.
+    const TEAM = { ...ACCOUNT_A, organizationUuid: 'org-team', organizationName: 'Team GmbH' }
+    seen.files.set(CREDS, JSON.stringify({ claudeAiOauth: tokens('t1') }))
+    seen.files.set(CONFIG, JSON.stringify({ oauthAccount: TEAM }, null, 2))
+    seen.profiles.set('at-t1', TEAM)
+    await command($, 'save')
+    expect(file(seen, `${STORE}/aaaa-1111_org-a.json`).claudeAiOauth.accessToken).toBe('at-a1')
+    const team = file(seen, `${STORE}/aaaa-1111_org-team.json`)
+    expect(team.claudeAiOauth.accessToken).toBe('at-t1')
+    expect(team.label).toBe('alice-2')
+    // The same email fits both: refused, with both named by organization.
+    expect(await command($, 'switch alice@work.example')).toMatch(/fits 2 accounts: alice \(.*Work Inc\); alice-2 \(.*Team GmbH\)/)
+    // The organization's name, or the short name, picks one.
+    expect(await command($, 'switch work inc')).toContain('Switched')
+    expect(file(seen, CONFIG).oauthAccount.organizationUuid).toBe('org-a')
+  })
+
+  test('a label already taken is refused', async ($, on) => {
+    const { seen } = world(on)
+    saveB(seen)
+    await $.session.start({ cwd: '/' } as never)
+    expect(await command($, 'label alice private')).toContain('the label "private" is taken by private')
+    expect(await command($, 'save private')).toContain('is taken')
+    expect(await command($, 'label alice arbeit')).toContain('Labelled arbeit')
   })
 })
