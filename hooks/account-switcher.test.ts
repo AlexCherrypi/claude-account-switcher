@@ -370,7 +370,10 @@ describe('Windows', () => {
     await $.session.start({ cwd: '/' } as never)
     expect(seen.files.has('/win/Users/u/.claude/account-switcher/accounts/aaaa-1111.json')).toBe(true)
     expect(seen.commands.some(c => c[0] === 'chmod')).toBe(false)
-    expect(await command($, 'where')).toContain('System: Windows')
+    const where = await command($, 'where')
+    expect(where).toContain('System: Windows')
+    expect(where).toContain('Saved in the store: yes – alice@work.example')
+    expect(where).toContain('Accounts in the store: 1 (alice@work.example)')
   })
 })
 

@@ -763,6 +763,13 @@ async function whereReport($: EngineInterface): Promise<string> {
     lines.push(`Account record names: ${uuid ? `${str(live.oauthAccount?.emailAddress) ?? '?'} (${uuid})` : 'no account'}`)
     if (live.tokens && uuid) {
       const accounts = await listAccounts($)
+      const saved = accounts.find(a => a.data.accountUuid === uuid)
+      lines.push(
+        saved
+          ? `Saved in the store: yes – ${describe(saved.data)}, last written ${saved.data.updatedAt} (${saved.path})`
+          : `Saved in the store: not yet – ${autoSave ? 'it is saved with the next /account or within 5 min (autoSave)' : 'autoSave is off: /account save'}`,
+      )
+      lines.push(`Accounts in the store: ${accounts.length}${accounts.length ? ` (${accounts.map(a => shortName(a.data)).join(', ')})` : ''}`)
       const owner = await ownerOf($, live.tokens, uuid, accounts)
       lines.push(owner === uuid ? 'Tokens and record agree.' : `Tokens belong to ${owner} – the record names another account (the next sync sets it right where that account is saved).`)
     }
