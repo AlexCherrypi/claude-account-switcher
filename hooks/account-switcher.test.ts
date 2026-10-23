@@ -17,7 +17,7 @@ function tokens(name: string, expiresAt = NOW + 8 * HOUR) {
 
 type WorldOpts = {
   // macOS: the login in the keychain; `locked`: the keychain refuses reads.
-  mac?: { locked?: boolean }
+  mac?: { locked?: boolean; refuseWrites?: number }
   windows?: boolean
   env?: Record<string, string>
 }
@@ -79,10 +79,26 @@ function world(on: On, opts: WorldOpts = {}) {
       const data = keychain.get(service)
       return data === undefined ? done(44, '', 'The specified item could not be found in the keychain.') : done(0, `${data}\n`)
     }
+    const fromHex = (hex: string) => new TextDecoder().decode(new Uint8Array(hex.match(/../g)!.map(h => parseInt(h, 16))))
+    const refuse = () => {
+      if (!opts.mac?.refuseWrites) return false
+      opts.mac.refuseWrites -= 1
+      return true
+    }
     if (e.argv[0] === 'security' && e.argv[1] === '-i') {
-      const m = /add-generic-password -U -a "([^"]*)" -s "([^"]*)" -X "([0-9a-f]*)"/.exec(String(e.init?.stdin))
+      const stdin = String(e.init?.stdin)
+      // security reads a line into 4096 bytes and refuses the pieces of a longer one.
+      if (stdin.length > 4096) return done(1, '', `security: unknown command "${stdin.slice(4096, 4200)}"`)
+      const m = /add-generic-password -U -a "([^"]*)" -s "([^"]*)" -X "([0-9a-f]*)"/.exec(stdin)
       if (!m) return done(0, '', 'error: unknown command')
-      keychain.set(m[2]!, new TextDecoder().decode(new Uint8Array(m[3]!.match(/../g)!.map(h => parseInt(h, 16)))))
+      if (refuse()) return done(1, '', `security: SecKeychainItemModifyContent: denied ${m[3]!.slice(0, 64)}`)
+      keychain.set(m[2]!, fromHex(m[3]!))
+      return done(0)
+    }
+    if (e.argv[0] === 'security' && e.argv[1] === 'add-generic-password') {
+      const arg = (flag: string) => e.argv[e.argv.indexOf(flag) + 1]!
+      if (refuse()) return done(1, '', `security: SecKeychainItemModifyContent: denied ${arg('-X').slice(0, 64)}`)
+      keychain.set(arg('-s'), fromHex(arg('-X')))
       return done(0)
     }
     return done(0)
@@ -434,5 +450,44 @@ describe('/login', () => {
     expect(c.claudeAiOauth.accessToken).toBe('at-c1')
     expect(file(seen, `${STORE}/aaaa-1111.json`).claudeAiOauth.accessToken).toBe('at-a2')
     expect(String((await call($, 'accounts')).result)).toContain('Accounts: 2 saved · active: alice@club.example')
+  })
+})
+
+describe('macOS: long logins and failed writes', () => {
+  // A login with MCP tokens beside it: longer in hex than security -i reads in a line.
+  const longLogin = () => JSON.stringify({ claudeAiOauth: tokens('a1'), mcpOAuth: { srv: { token: 'x'.repeat(3000) } } })
+
+  test('a login too long for security -i is written as an argument', async ($, on) => {
+    const { seen } = world(on, { mac: {} })
+    seen.keychain.set('Claude Code-credentials', longLogin())
+    saveB(seen)
+    const r = await call($, 'switch', { account: 'private', reason: 'room' })
+    expect(r.deny).toBeUndefined()
+    const item = JSON.parse(seen.keychain.get('Claude Code-credentials')!)
+    expect(item.claudeAiOauth.accessToken).toBe('at-b1')
+    expect(item.mcpOAuth.srv.token.length).toBe(3000)
+  })
+
+  test('a refused write puts the old login back and shows no part of it', async ($, on) => {
+    const { seen } = world(on, { mac: { refuseWrites: 1 } })
+    saveB(seen)
+    const before = seen.keychain.get('Claude Code-credentials')
+    const r = await call($, 'switch', { account: 'private', reason: 'room' })
+    expect(r.deny).toMatch(/could not write the login \(the keychain refused the write.*\) – the old login is back in place/)
+    expect(r.deny).not.toMatch(/[0-9a-f]{16,}/)
+    expect(seen.keychain.get('Claude Code-credentials')).toBe(before)
+    expect(file(seen, CONFIG).oauthAccount).toEqual(ACCOUNT_A)
+  })
+})
+
+describe('a broken login', () => {
+  test('is named as such, and a switch to a saved account repairs it', async ($, on) => {
+    const { seen } = world(on, { mac: {} })
+    saveB(seen)
+    seen.keychain.set('Claude Code-credentials', '{"claudeAiOauth":{"accessToken":"at-a1","refre')
+    expect(await command($, 'where')).toContain('BROKEN')
+    expect(await command($, 'switch private')).toContain('Switched')
+    expect(JSON.parse(seen.keychain.get('Claude Code-credentials')!).claudeAiOauth.accessToken).toBe('at-b1')
+    expect(file(seen, CONFIG).oauthAccount).toEqual(ACCOUNT_B)
   })
 })

@@ -73,6 +73,8 @@ type Live = {
   tokens: OAuthTokens | null
   oauthAccount: Record<string, unknown> | null
   configPath: string
+  // There is a login, but it is no JSON (cut short by a write that failed): no tokens to save.
+  unreadable: boolean
 }
 
 type Settings = { allowModelSwitch?: boolean }
@@ -261,17 +263,35 @@ async function keychainRead($: EngineInterface, service: string, user: string): 
   return { text: out.startsWith('{') || !/^[0-9a-f]+$/i.test(out) ? out : fromHex(out) }
 }
 
+// `security -i` reads each command as one line into a buffer of 4096 bytes and cuts a
+// longer one into pieces it then refuses ("unknown command"). A login with its MCP tokens
+// is often longer than that in hex.
+const SECURITY_LINE_MAX = 4000
+
+// What `security` printed, without any run of hex in it: it echoes the command it refused,
+// and that holds the login.
+function scrub(text: string): string {
+  return text.replace(/[0-9a-f]{16,}/gi, '…').replace(/\s+/g, ' ').trim().slice(0, 200)
+}
+
 async function keychainWrite($: EngineInterface, service: string, user: string, text: string): Promise<void> {
-  // Through `security -i`, as Claude Code itself does, so the secret is never on a command line.
   const q = (s: string) => `"${s.replace(/(["\\])/g, '\\$1')}"`
-  const r = await $.process.run(['security', '-i'], {
-    stdin: `add-generic-password -U -a ${q(user)} -s ${q(service)} -X ${q(toHex(text))}\n`,
-    timeoutMs: 10_000,
-  })
+  const hex = toHex(text)
+  const line = `add-generic-password -U -a ${q(user)} -s ${q(service)} -X ${q(hex)}\n`
+  // Through `security -i` where it fits, as Claude Code does, so the secret is on no
+  // command line; a longer one goes as an argument (seen for a moment by processes of
+  // the same user, as Claude Code does too).
+  const r =
+    line.length <= SECURITY_LINE_MAX
+      ? await $.process.run(['security', '-i'], { stdin: line, timeoutMs: 10_000 })
+      : await $.process.run(['security', 'add-generic-password', '-U', '-a', user, '-s', service, '-X', hex], { timeoutMs: 10_000 })
   // `security -i` can exit 0 and still print the refusal of a command it ran.
-  if (r.exitCode !== 0 || /error|denied|not allowed/i.test(r.stderr)) {
-    throw new Error(`the keychain refused the write (security exited ${r.exitCode}): ${r.stderr.trim().slice(0, 200)}`)
+  if (r.exitCode !== 0 || /error|denied|not allowed|unknown command/i.test(r.stderr)) {
+    throw new Error(`the keychain refused the write (security exited ${r.exitCode}${r.stderr.trim() ? `: ${scrub(r.stderr)}` : ''})`)
   }
+  // Read back: only what is there counts.
+  const back = await keychainRead($, service, user)
+  if (!('text' in back) || back.text !== text) throw new Error('the keychain item does not hold what was written')
 }
 
 // The keychain account Claude Code files its item under: $USER, else the login name.
@@ -326,7 +346,7 @@ async function readLive($: EngineInterface): Promise<Live> {
   }
   const config = await safe(() => readGlobalConfig($, configPath))
   const oauthAccount = isObject(config?.oauthAccount) ? (config.oauthAccount as Record<string, unknown>) : null
-  return { backend, doc, tokens: parseTokens(doc), oauthAccount, configPath }
+  return { backend, doc, tokens: parseTokens(doc), oauthAccount, configPath, unreadable: Boolean(text?.trim()) && doc === null }
 }
 
 async function restrict($: EngineInterface, path: string): Promise<void> {
@@ -758,7 +778,11 @@ async function whereReport($: EngineInterface): Promise<string> {
     const live = await readLive($)
     lines.push(
       `Login found in: ${live.backend.kind === 'keychain' ? `the macOS keychain ("${live.backend.service}")` : live.backend.path}` +
-        (live.tokens ? '' : ' – but it holds no claude.ai tokens (an API key, a cloud provider, or not signed in)'),
+        (live.unreadable
+          ? ' – but it is BROKEN (no readable JSON, cut short by a failed write): /account switch <a saved account> or /login repairs it'
+          : live.tokens
+            ? ''
+            : ' – but it holds no claude.ai tokens (an API key, a cloud provider, or not signed in)'),
     )
     const uuid = accountUuid(live.oauthAccount)
     lines.push(`Account record names: ${uuid ? `${str(live.oauthAccount?.emailAddress) ?? '?'} (${uuid})` : 'no account'}`)
@@ -791,7 +815,8 @@ async function switchTo($: EngineInterface, query: string, how: SwitchBy): Promi
     if ('error' in found) throw new Error(found.error)
     const target = found
     if (target.data.accountUuid === fromUuid) return `Already on ${describe(target.data)} – nothing to switch.`
-    if (fromUuid && !current) {
+    // A login with no tokens in it (signed out, or broken) has nothing to lose: switching repairs it.
+    if (fromUuid && !current && live.tokens) {
       throw new Error(
         `the account signed in now (${str(live.oauthAccount?.emailAddress) ?? fromUuid}) is not saved, and autoSave is off – its login would be lost. Save it first (/account save, or ${T_SAVE}).`,
       )
@@ -814,7 +839,16 @@ async function switchTo($: EngineInterface, query: string, how: SwitchBy): Promi
     // The login: the target's tokens, everything else in the document as it was.
     const previousDoc = live.doc
     const doc = { ...(live.doc ?? {}), claudeAiOauth: target.data.claudeAiOauth }
-    await writeBackend($, live.backend, doc)
+    try {
+      await writeBackend($, live.backend, doc)
+    } catch (err) {
+      // A write that failed half-way may have left a broken login: put the old one back.
+      const restored = previousDoc ? await safe(() => writeBackend($, live.backend, previousDoc).then(() => true)) : false
+      throw new Error(
+        `could not write the login (${errorText(err)}) – ` +
+          (restored ? 'the old login is back in place, nothing changed' : 'and the old login could not be put back: sign in again with /login'),
+      )
+    }
     try {
       const config = await readGlobalConfig($, live.configPath)
       config.oauthAccount = target.data.oauthAccount
