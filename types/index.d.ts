@@ -12,6 +12,10 @@ export type AccountRow = {
 
 declare module 'claude-code' {
   interface PluginState {
-    'account-switcher': { rows: Shaped<AccountRow[]> }
+    'account-switcher': {
+      rows: Shaped<AccountRow[]>
+      // The account whose Remove was pressed once and waits for the second press; '' none.
+      pendingRemove: Shaped<string>
+    }
   }
 }

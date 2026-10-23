@@ -804,6 +804,7 @@ const LEVEL_TEXT: Record<Level, string> = {
 
 const PANE = 'account-switcher'
 const rows = atom({ plugin: 'account-switcher', key: 'rows' } as const, [] as AccountRow[], { shape: 'rows-1' })
+const pendingRemove = atom({ plugin: 'account-switcher', key: 'pendingRemove' } as const, '', { shape: 'pending-1' })
 
 // What the pane draws, from the account files (their last readings: no server request).
 async function refreshRows($: EngineInterface): Promise<void> {
@@ -822,6 +823,31 @@ async function refreshRows($: EngineInterface): Promise<void> {
     limits: (a.data.lastUsage ? fmtLimits(a.data.lastUsage, at) : 'limits not read yet') + (a.data.lastUsage && isFull(a.data.lastUsage, at) ? ' · FULL' : ''),
   }))
   await update($, rows, () => list)
+}
+
+// Deletes an account's file; refused for the active one (autoSave would save it again).
+async function removeAccount($: EngineInterface, account: Account): Promise<string> {
+  const live = await safe(() => readLive($))
+  if (live && keyOf(live.oauthAccount) === keyOfFile(account.data) && autoSave) {
+    return `${describe(account.data)} is the active account and would be saved again at once (autoSave). Switch away first.`
+  }
+  const argv = (await isWindows($)) ? ['cmd', '/c', 'del', '/f', '/q', account.path.replace(/\//g, '\\')] : ['rm', '-f', account.path]
+  const r = await $.process.run(argv, { timeoutMs: 5_000 })
+  if (r.exitCode !== 0) return `Could not remove ${account.path}: ${scrub(r.stderr)}`
+  void safe(() => refreshRows($))
+  return `Removed ${describe(account.data)} (its file is gone; its login elsewhere is untouched).`
+}
+
+// Gives an account a new short name; refused where another carries it.
+async function renameAccount($: EngineInterface, account: Account, label: string): Promise<string> {
+  const accounts = await listAccounts($)
+  const name = label.trim() || null
+  const clash = labelClash(accounts, name, keyOfFile(account.data))
+  if (clash) return clash
+  account.data.label = name ?? autoLabel(accounts, { ...account.data, label: null })
+  await writeAccount($, account)
+  void safe(() => refreshRows($))
+  return `Renamed: ${describe(account.data)}.`
 }
 
 async function openPane($: EngineInterface): Promise<void> {
@@ -1277,19 +1303,58 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
+    // Mobile draws no text fields: renaming is /account label there.
+    const Input = e.surface === 'mobile' ? null : $.ui.resolve(e).Input
     const list = await read($, rows)
+    const pending = await read($, pendingRemove)
+    const find = async (key: string) => (await listAccounts($)).find(a => keyOfFile(a.data) === key)
+    const say = (text: string) => toast($, `Account: ${text}`)
     const change = (row: AccountRow) => async () => {
-      const accounts = await listAccounts($)
-      const account = accounts.find(a => keyOfFile(a.data) === row.key)
-      if (!account) return refreshRows($)
-      const r = await setLevel($, account, nextLevel(levelOf(account.data), mustAsk(account.data)))
-      if (r.refused) toast($, r.text)
+      const account = await find(row.key)
+      if (account) {
+        const r = await setLevel($, account, nextLevel(levelOf(account.data), mustAsk(account.data)))
+        if (r.refused) say(r.text)
+      }
       await refreshRows($)
+    }
+    const switchHere = (row: AccountRow) => async () => {
+      await update($, pendingRemove, () => '')
+      try {
+        const text = await switchTo($, row.key, { by: 'person' })
+        say(`switched to ${row.name}`)
+        // The model reads it with its next turn, as it does after /account switch.
+        await safe(() => $.session.append({ message: { type: 'user', content: [{ type: 'text', text: `[The user switched the Claude account in the account settings pane.]\n${text}` }] } } as never))
+      } catch (err) {
+        say(errorText(err))
+      }
+      await refreshRows($)
+    }
+    const remove = (row: AccountRow) => async () => {
+      if (pending !== row.key) return update($, pendingRemove, () => row.key)
+      await update($, pendingRemove, () => '')
+      const account = await find(row.key)
+      say(account ? await removeAccount($, account) : 'already gone')
+      await refreshRows($)
+    }
+    const rename = (row: AccountRow) => async (value: string) => {
+      const account = await find(row.key)
+      say(account ? await renameAccount($, account, value) : 'already gone')
+    }
+    const refresh = async () => {
+      say('reading every account’s limits …')
+      await safe(() => overview($, { refresh: true }))
+      await refreshRows($)
+      say('limits read')
     }
     return (
       <Box flexDirection="column">
-        <Text bold>What the model may do per account</Text>
-        <Text dimColor>Tab / arrows: next account · Enter: change · Esc: close</Text>
+        <Text bold>Accounts</Text>
+        <Text dimColor>Tab / arrows: move · Enter: press · Esc: close</Text>
+        <Box flexDirection="row" marginTop={1}>
+          <Button key="refresh" onPress={refresh}>
+            Read limits anew
+          </Button>
+        </Box>
         {list.length === 0 && <Text dimColor>No account saved yet – sign in with /login, it is saved on its own.</Text>}
         {list.map((row, i) => (
           <Box key={`row-${row.key}`} flexDirection="column" marginTop={1}>
@@ -1297,12 +1362,31 @@ export const register: Register = (on, options) => {
               {row.active ? '▶ ' : '○ '}
               {row.name} <Text dimColor>{row.who}</Text>
               {'  '}
-              <Text bold>[{LEVEL_TEXT[row.level]}{row.enforced && row.level === 'ask' ? ', enforced' : ''}]</Text>
+              <Text bold>
+                [model: {LEVEL_TEXT[row.level]}
+                {row.enforced && row.level === 'ask' ? ', enforced' : ''}]
+              </Text>
             </Button>
             <Text dimColor>└ {row.limits}</Text>
+            <Box flexDirection="row">
+              {row.active ? (
+                <Text dimColor>active </Text>
+              ) : (
+                <Button key={`switch:${row.key}`} onPress={switchHere(row)}>
+                  Switch here
+                </Button>
+              )}
+              {!row.active && <Text> </Text>}
+              {!row.active && (
+                <Button key={`remove:${row.key}`} onPress={remove(row)} variant={pending === row.key ? 'primary' : undefined}>
+                  {pending === row.key ? 'Really remove? Press again' : 'Remove'}
+                </Button>
+              )}
+            </Box>
+            {Input && <Input key={`label:${row.key}`} label="Name" value={row.name} submitLabel="Rename" onSubmit={rename(row)} />}
           </Box>
         ))}
-        <Text dimColor>switch freely: at once · ask first: a dialog asks you · never: only you can switch there</Text>
+        <Text dimColor>model: switch freely = at once · ask first = a dialog asks you · never = only you can switch there</Text>
       </Box>
     )
   })
@@ -1361,6 +1445,7 @@ export const register: Register = (on, options) => {
           const clash = labelClash(accounts, label, keyOfFile(found.data))
           if (clash) return { text: clash }
           found.data.label = label
+          void safe(() => refreshRows($))
           await writeAccount($, found)
           return { text: `${found.data.label ? 'Labelled' : 'Label removed:'} ${describe(found.data)}.` }
         }
@@ -1370,14 +1455,7 @@ export const register: Register = (on, options) => {
           const accounts = await listAccounts($)
           const found = findAccount(accounts, tail)
           if ('error' in found) return { text: found.error }
-          const live = await safe(() => readLive($))
-          if (live && keyOf(live.oauthAccount) === keyOfFile(found.data) && autoSave) {
-            return { text: `${describe(found.data)} is the active account and would be saved again at once (autoSave). Switch away first.` }
-          }
-          const argv = (await isWindows($)) ? ['cmd', '/c', 'del', '/f', '/q', found.path.replace(/\//g, '\\')] : ['rm', '-f', found.path]
-          const r = await $.process.run(argv, { timeoutMs: 5_000 })
-          if (r.exitCode !== 0) return { text: `Could not remove ${found.path}: ${r.stderr.trim()}` }
-          return { text: `Removed ${describe(found.data)} (its file is gone; its login elsewhere is untouched).` }
+          return { text: await removeAccount($, found) }
         }
         case 'allow':
         case 'ask':

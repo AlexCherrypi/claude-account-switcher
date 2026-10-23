@@ -129,10 +129,20 @@ Each account says whether the model may switch to it on its own:
   (`pluginConfigs` → `account-switcher` → `options` → `alwaysAsk`), where neither the user nor the
   model can change it.
 
-**The settings pane.** `/account settings` opens a pane with one row per account: its short name,
-email, organization, last limits and level. **Tab** (or the arrows) moves from account to
-account. **Enter** steps the level on: *switch freely → ask first → never*, skipping *switch
-freely* where asking is enforced. **Esc** closes it.
+**The settings pane.** `/account settings` opens a pane to manage your accounts. Each account
+shows its short name, email, organization and plan, its last limits, and what the model may do.
+Below that are its buttons:
+
+- **[model: …]**: Enter steps it on, *switch freely → ask first → never*. It skips *switch
+  freely* where asking is enforced.
+- **Switch here**: your own switch, so it never asks. The model is told with its next turn.
+- **Remove**: deletes the account's file. The first press asks *Really remove? Press again*.
+  The active account has no Remove, because autoSave would save it again at once.
+- **Name**: a text field to rename it. A name another account carries is refused. Mobile draws
+  no text fields, so use `/account label` there.
+
+At the top, **Read limits anew** asks the server for every account's limits. **Tab** or the
+arrows move between the buttons, **Enter** presses one, and **Esc** closes the pane.
 
 `/account` shows each account as *model may switch here*, *model asks first*, *model asks first
 (enforced)* or *model may NOT switch here*.
@@ -175,7 +185,7 @@ organizations. A label another account already carries is refused.
 /account switch <name>        switch (label, email, name, number or uuid; a unique part is enough)
 /account label <name> <label> set or (no label) remove a label
 /account remove <name>        delete an account's file (not the active one)
-/account settings             a pane: Tab between accounts, Enter changes what the model may do
+/account settings             a pane to manage them: level, switch, rename, remove, read limits
 /account allow <name>         let the model switch to this account on its own
 /account ask <name>           the model asks you before it switches to this account (the default)
 /account block <name>         the model may never switch to this account (you still can)

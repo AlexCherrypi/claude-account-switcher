@@ -684,25 +684,83 @@ describe('the settings pane', () => {
     for (const surface of ['terminal', 'desktop'] as const) {
       const ui = await $.ui.mount({ ...PANE, surface } as never)
       const row = async (key: string) => (await ui.find({ type: 'Button', key } as never)) as { text?: string } | undefined
-      expect((await row('bbbb-2222|org-b'))?.text).toMatch(/private .*alice@home\.example.*\[ask first\]/)
-      expect((await row('aaaa-1111|org-a'))?.text).toMatch(/▶ alice .*\[ask first, enforced\]/)
+      expect((await row('bbbb-2222|org-b'))?.text).toMatch(/private .*alice@home\.example.*\[model: ask first\]/)
+      expect((await row('aaaa-1111|org-a'))?.text).toMatch(/▶ alice .*\[model: ask first, enforced\]/)
       expect((await ui.find({ type: 'Text', text: /5-hour 91%/ } as never))).toBeTruthy()
 
       await ui.press({ key: 'bbbb-2222|org-b' } as never)
       expect(file(seen, `${STORE}/bbbb-2222.json`).modelBlocked).toBe(true)
-      expect((await row('bbbb-2222|org-b'))?.text).toMatch(/\[never\]/)
+      expect((await row('bbbb-2222|org-b'))?.text).toMatch(/\[model: never\]/)
       await ui.press({ key: 'bbbb-2222|org-b' } as never)
       expect(file(seen, `${STORE}/bbbb-2222.json`).autoSwitch).toBe(true)
-      expect((await row('bbbb-2222|org-b'))?.text).toMatch(/\[switch freely\]/)
+      expect((await row('bbbb-2222|org-b'))?.text).toMatch(/\[model: switch freely\]/)
       await ui.press({ key: 'bbbb-2222|org-b' } as never)
-      expect((await row('bbbb-2222|org-b'))?.text).toMatch(/\[ask first\]/)
+      expect((await row('bbbb-2222|org-b'))?.text).toMatch(/\[model: ask first\]/)
 
       // Asking is enforced for alice: the steps skip "switch freely".
       await ui.press({ key: 'aaaa-1111|org-a' } as never)
-      expect((await row('aaaa-1111|org-a'))?.text).toMatch(/\[never\]/)
+      expect((await row('aaaa-1111|org-a'))?.text).toMatch(/\[model: never\]/)
       await ui.press({ key: 'aaaa-1111|org-a' } as never)
-      expect((await row('aaaa-1111|org-a'))?.text).toMatch(/\[ask first, enforced\]/)
+      expect((await row('aaaa-1111|org-a'))?.text).toMatch(/\[model: ask first, enforced\]/)
       await ui.unmount()
     }
+  })
+})
+
+describe('managing accounts in the pane', () => {
+  const PANE = {
+    plugin: 'account-switcher',
+    component: 'Pane',
+    requestId: 'account-switcher',
+    props: { title: 'Accounts', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
+  } as const
+
+  test('switch, rename and remove (with a second press) from the pane', async ($, on) => {
+    const { seen } = world(on)
+    mock.session(on)
+    saveB(seen, tokens('b1'), false)
+    await $.session.start({ cwd: '/' } as never)
+    await command($, 'settings')
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' } as never)
+    const button = async (key: string) => (await ui.find({ type: 'Button', key } as never)) as { text?: string } | undefined
+
+    // The active account has no Switch or Remove.
+    expect(await button('switch:aaaa-1111|org-a')).toBeUndefined()
+    expect(await button('remove:aaaa-1111|org-a')).toBeUndefined()
+
+    // Rename.
+    await ui.input({ key: 'label:bbbb-2222|org-b', text: 'home' } as never)
+    expect(file(seen, `${STORE}/bbbb-2222.json`).label).toBe('home')
+    await ui.input({ key: 'label:bbbb-2222|org-b', text: 'alice' } as never)
+    expect(seen.toasts.some(t => t.includes('the label "alice" is taken'))).toBe(true)
+    expect(file(seen, `${STORE}/bbbb-2222.json`).label).toBe('home')
+
+    // Switch: the user's own, no dialog even though the account is "ask first".
+    await ui.press({ key: 'switch:bbbb-2222|org-b' } as never)
+    expect(seen.questions).toEqual([])
+    expect(file(seen, CREDS).claudeAiOauth.accessToken).toBe('at-b1')
+    expect((await button('bbbb-2222|org-b'))?.text).toMatch(/^▶ home/)
+
+    // Remove alice, now inactive: the first press only asks.
+    expect((await button('remove:aaaa-1111|org-a'))?.text).toBe('Remove')
+    await ui.press({ key: 'remove:aaaa-1111|org-a' } as never)
+    expect(seen.files.has(`${STORE}/aaaa-1111_org-a.json`)).toBe(true)
+    expect((await button('remove:aaaa-1111|org-a'))?.text).toMatch(/Really remove\? Press again/)
+    await ui.press({ key: 'remove:aaaa-1111|org-a' } as never)
+    expect(seen.files.has(`${STORE}/aaaa-1111_org-a.json`)).toBe(false)
+    expect(await button('aaaa-1111|org-a')).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('mobile draws no text field; the rest works there too', async ($, on) => {
+    const { seen } = world(on)
+    saveB(seen, tokens('b1'), false)
+    await $.session.start({ cwd: '/' } as never)
+    await command($, 'settings')
+    const ui = await $.ui.mount({ ...PANE, surface: 'mobile' } as never)
+    expect(await ui.find({ type: 'Input' } as never)).toBeUndefined()
+    await ui.press({ key: 'bbbb-2222|org-b' } as never)
+    expect(file(seen, `${STORE}/bbbb-2222.json`).modelBlocked).toBe(true)
+    await ui.unmount()
   })
 })
