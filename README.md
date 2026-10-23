@@ -94,7 +94,9 @@ for 3 minutes, and `refresh` reads again (at most every 30 s per account).
   the model names by label, email, display name, its number in the list, or uuid. The model can
   only switch:
   - while you allow it (option `allowModelSwitch`, or `/account auto on|off`; on by default),
-  - at most once every `switchCooldownMinutes` (default 5), so it doesn't switch back and forth,
+  - to an account on your **allow list** at once, at most once every `switchCooldownMinutes`
+    (default 5), so it doesn't switch back and forth,
+  - to any other account only after **you confirm it** in a dialog the plugin opens (see below),
   - from the main agent, never a subagent,
   - with a `reason`, which shows in the result and as a toast.
 - `mcp__account-switcher__save` `{ label? }`: saves the account Claude Code is signed in with now.
@@ -102,6 +104,20 @@ for 3 minutes, and `refresh` reads again (at most every 30 s per account).
 The model also gets a short briefing in its system prompt: when a limit runs high, check the
 other accounts first. If one has room and the model may switch, it switches at a clean point and
 carries on instead of pausing. If it may not, it tells you which account has room.
+
+## Allow list
+
+Each account says whether the model may switch to it on its own:
+
+- **On the list** (`/account allow <name>`): the model switches to it at once when it needs to.
+- **Off the list** (`/account ask <name>`, the default for every new login): the model's `switch`
+  opens a dialog, *"Switch the Claude account to … ? Reason given: …"*, with **Switch** and
+  **Don't switch**. The plugin asks this, not the model, so the model can't answer it, and no
+  permission mode or auto-mode classifier settles it. If you dismiss the dialog, or nobody can be
+  asked (`claude -p`), nothing is switched.
+
+`/account` shows each account as *model may switch here* or *model asks first*. Your own
+`/account switch` never asks. `/account auto off` stops the model switching at all, list or not.
 
 ## With CTM
 
@@ -134,7 +150,9 @@ organizations. A label another account already carries is refused.
 /account switch <name>        switch (label, email, name, number or uuid; a unique part is enough)
 /account label <name> <label> set or (no label) remove a label
 /account remove <name>        delete an account's file (not the active one)
-/account auto on|off|default  let the model switch on its own, or not
+/account allow <name>         let the model switch to this account on its own
+/account ask <name>           the model asks you before it switches to this account (the default)
+/account auto on|off|default  let the model switch at all, or not
 /account where                where this machine keeps the login, and whether it is consistent
 ```
 

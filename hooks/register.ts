@@ -58,6 +58,9 @@ type AccountFile = {
   lastUsage?: Usage
   // Its refresh token was refused: only a new /login with it brings it back.
   needsLogin?: boolean
+  // On the allow list: the model may switch to it on its own. Otherwise it may only ask,
+  // and the user confirms in a dialog the plugin opens.
+  autoSwitch?: boolean
 }
 
 type Account = { path: string; data: AccountFile }
@@ -432,6 +435,7 @@ function accountFrom(oauthAccount: Record<string, unknown>, tokens: OAuthTokens,
     oauthAccount,
     claudeAiOauth: tokens,
     ...(before?.lastUsage ? { lastUsage: before.lastUsage } : {}),
+    ...(before?.autoSwitch ? { autoSwitch: true } : {}),
   }
 }
 
@@ -555,6 +559,8 @@ function findAccount(accounts: Account[], query: string): Account | { error: str
     if (a) return a
   }
   const fields = (a: AccountFile) => [a.label, a.email, a.displayName, a.organizationName, a.accountUuid].filter((x): x is string => Boolean(x)).map(x => x.toLowerCase())
+  const byKey = accounts.find(a => keyOfFile(a.data).toLowerCase() === q)
+  if (byKey) return byKey
   // A label names one account: it wins over a name or email that others share.
   const labelled = accounts.find(a => a.data.label?.toLowerCase() === q)
   if (labelled) return labelled
@@ -788,7 +794,8 @@ async function overview($: EngineInterface, { refresh }: { refresh: boolean }): 
     // Every line starts with a glyph: Claude Code shifts lines that start with spaces.
     const mark = keyOfFile(d) === activeUuid ? '▶' : '○'
     const facts = [d.email, d.displayName, d.organizationName, d.subscriptionType].filter(Boolean).join(' · ')
-    lines.push(`${mark} ${i + 1}. ${d.label ? `${d.label} – ` : ''}${facts || d.accountUuid}`)
+    const allow = d.autoSwitch ? 'model may switch here' : 'model asks first'
+    lines.push(`${mark} ${i + 1}. ${d.label ? `${d.label} – ` : ''}${facts || d.accountUuid} · ${allow}`)
     let detail = `└ ${fmtLimits(r.usage, at)}`
     if (r.usage && isFull(r.usage, at)) detail += ' · FULL'
     if (d.needsLogin) detail += ' · NEEDS A NEW LOGIN (its refresh token was refused)'
@@ -807,7 +814,8 @@ async function overview($: EngineInterface, { refresh }: { refresh: boolean }): 
   )
   lines.push(
     may
-      ? `You may switch on your own (${T_SWITCH}${cooldownMs > 0 ? `, at most every ${cooldownMs / MINUTE} min` : ''}).`
+      ? `You may switch on your own to accounts marked "model may switch here" (${T_SWITCH}${cooldownMs > 0 ? `, at most every ${cooldownMs / MINUTE} min` : ''}); ` +
+          `to one marked "model asks first", ${T_SWITCH} puts the switch to the user in a dialog and switches only if they confirm.`
       : 'The user has NOT allowed you to switch on your own: suggest a switch to them instead (/account switch <name>).',
   )
   return lines.join('\n')
@@ -940,7 +948,7 @@ const BRIEFING = [
   '# Account switcher',
   'The user keeps several Claude accounts; the account-switcher plugin can switch this session (and every Claude Code session on this machine) between them in seconds, without a restart.',
   `- ${T_ACCOUNTS}: the saved accounts (label, email, name, organization, plan), which is active, and each one's 5-hour and 7-day limits – read from the server without switching; refresh=true reads them anew.`,
-  `- ${T_SWITCH}: switches to another saved account from your next request on (needs "account" and a short "reason"). Only while the user lets you – ${T_ACCOUNTS} says whether – and not more often than the cooldown.`,
+  `- ${T_SWITCH}: switches to another saved account from your next request on (needs "account" and a short "reason"). Only while the user lets you – ${T_ACCOUNTS} says whether. To an account on the user's allow list ("model may switch here") it switches at once, not more often than the cooldown; to any other it first asks the user in a dialog and switches only if they confirm – a "no" is final for now, do not ask again right away.`,
   `- ${T_SAVE}: saves the account signed in now (normally that happens on its own).`,
   '- When a limit runs high (CTM\'s blocks show the active account\'s limits; past a pause mark they ask you to pause), check the other accounts first: if one has room and you may switch, switch to it at a clean point and carry on instead of pausing. Prefer the account with the most room that does not reset soon anyway; do not switch back and forth.',
   '- If you may not switch on your own, tell the user which account has room and that /account switch <name> moves there.',
@@ -980,7 +988,8 @@ export const register: Register = (on, options) => {
       description:
         'Account switcher: switches Claude Code to another saved account, effective from your next request – no restart. ' +
         'The current account\'s login is saved first. Only while the user lets you (see ' +
-        `${T_ACCOUNTS}), and not more often than every ${cooldownMs / MINUTE} min. Use it to go on working when the ` +
+        `${T_ACCOUNTS}). An account on the user\'s allow list is switched to at once (at most every ${cooldownMs / MINUTE} min); ` +
+        'for any other the user is asked in a dialog first and decides. Use it to go on working when the ' +
         'active account\'s limits run high and another has room. It switches every Claude Code session on this machine.',
       inputSchema: {
         type: 'object',
@@ -1007,8 +1016,8 @@ export const register: Register = (on, options) => {
     await safe(() =>
       $.command.register({
         name: 'account',
-        description: 'Claude accounts: /account lists them with their limits · save [label] · switch <name> · label <name> <label> · remove <name> · auto on|off · where',
-        argumentHint: '[list|save|switch|label|remove|auto|where] …',
+        description: 'Claude accounts: /account lists them with their limits · switch <name> · allow|ask <name> · save [label] · label <name> <label> · remove <name> · auto on|off · where',
+        argumentHint: '[list|switch|allow|ask|save|label|remove|auto|where] …',
       }),
     )
     await ensureSettings($)
@@ -1066,12 +1075,43 @@ export const register: Register = (on, options) => {
     const account = typeof input.account === 'string' ? input.account : ''
     const reason = typeof input.reason === 'string' ? input.reason.trim() : ''
     if (!reason) return { deny: 'Account switcher: give a short "reason" for the switch.' }
-    const at = await now($)
-    if (at - lastModelSwitchAt < cooldownMs) {
-      return { deny: `Account switcher: you switched ${fmtSpan(lastModelSwitchAt, at)} ago – wait ${fmtSpan(at, lastModelSwitchAt + cooldownMs)} more (no switching back and forth).` }
+    const accounts = await listAccounts($)
+    await ensureLabels($, accounts)
+    const target = findAccount(accounts, account)
+    if ('error' in target) return { deny: `Account switcher: ${target.error}` }
+    if (target.data.autoSwitch) {
+      const at = await now($)
+      if (at - lastModelSwitchAt < cooldownMs) {
+        return { deny: `Account switcher: you switched ${fmtSpan(lastModelSwitchAt, at)} ago – wait ${fmtSpan(at, lastModelSwitchAt + cooldownMs)} more (no switching back and forth).` }
+      }
+    } else {
+      // Not on the allow list: the user decides, in a dialog this plugin opens – the
+      // model cannot answer it, and no permission mode or classifier settles it.
+      const live = await safe(() => readLive($))
+      if (live && keyOf(live.oauthAccount) === keyOfFile(target.data)) return { result: `Already on ${describe(target.data)} – nothing to switch.` }
+      const question = `Switch the Claude account to ${describe(target.data)}? Reason given: ${reason}`
+      let answer: string | undefined
+      try {
+        answer = await $.ui.ask(question, {
+          header: 'Account',
+          options: [
+            { label: 'Switch', description: 'Switch now; every Claude Code session on this machine follows.' },
+            { label: 'Don’t switch', description: 'Stay on the current account.' },
+          ],
+        } as never)
+      } catch {
+        answer = undefined
+      }
+      if (answer !== 'Switch') {
+        return {
+          deny:
+            `Account switcher: the user did not confirm the switch to ${describe(target.data)}${answer ? ` (answer: ${answer})` : ''}. ` +
+            'Do not ask again for this right away; go on on the current account or pause as CTM asks.',
+        }
+      }
     }
     try {
-      return { result: await switchTo($, account, { by: 'model', reason }) }
+      return { result: await switchTo($, keyOfFile(target.data), { by: 'model', reason }) }
     } catch (err) {
       return { deny: `Account switcher: ${errorText(err)}` }
     }
@@ -1094,7 +1134,7 @@ export const register: Register = (on, options) => {
     const args = e.args.trim()
     const [verb = 'list', ...rest] = args.split(/\s+/).filter(Boolean)
     const tail = rest.join(' ')
-    const usage = 'Usage: /account [list|usage|where] · /account save [label] · /account switch <name> · /account label <name> <label> · /account remove <name> · /account auto on|off|default'
+    const usage = 'Usage: /account [list|usage|where] · /account allow|ask <name> · /account save [label] · /account switch <name> · /account label <name> <label> · /account remove <name> · /account auto on|off|default'
     try {
       switch (verb.toLowerCase()) {
         case 'list':
@@ -1142,6 +1182,19 @@ export const register: Register = (on, options) => {
           const r = await $.process.run(argv, { timeoutMs: 5_000 })
           if (r.exitCode !== 0) return { text: `Could not remove ${found.path}: ${r.stderr.trim()}` }
           return { text: `Removed ${describe(found.data)} (its file is gone; its login elsewhere is untouched).` }
+        }
+        case 'allow':
+        case 'ask': {
+          const accounts = await listAccounts($)
+          await ensureLabels($, accounts)
+          const found = findAccount(accounts, tail)
+          if ('error' in found) return { text: found.error }
+          found.data.autoSwitch = verb.toLowerCase() === 'allow'
+          await writeAccount($, found)
+          const text = found.data.autoSwitch
+            ? `The model may now switch to ${describe(found.data)} on its own.`
+            : `The model now asks you before it switches to ${describe(found.data)}.`
+          return { text, context: [`The user changed this with /account ${verb}: ${text}`] }
         }
         case 'where':
         case 'doctor':

@@ -49,6 +49,9 @@ function world(on: On, opts: WorldOpts = {}) {
     fetches: [] as string[],
     commands: [] as string[][],
     toasts: [] as string[],
+    // What the user picks in the plugin's confirmation dialog; null: they dismiss it.
+    answer: null as string | null,
+    questions: [] as string[],
   }
   mock.env(on, opts.windows ? { OS: 'Windows_NT', HOME: '/c/Users/u', USERPROFILE: '/win/Users/u', ...opts.env } : { HOME: '/home/u', USER: 'u', ...opts.env })
   mock.store(on)
@@ -133,6 +136,13 @@ function world(on: On, opts: WorldOpts = {}) {
     seen.toasts.push(String((e as unknown as { text: string }).text))
     return { value: undefined } as never
   })
+  // The engine's AskUserQuestion dialog, as $.ui.ask raises it.
+  on('tool.call', { tool: 'AskUserQuestion' }, (_$, e) => {
+    const q = (e as unknown as { questions: { question: string }[] }).questions[0]!.question
+    seen.questions.push(q)
+    if (seen.answer === null) return { deny: 'The user dismissed the question.' } as never
+    return { result: { questions: (e as unknown as { questions: unknown }).questions, answers: { [q]: seen.answer } } } as never
+  })
   on('tool.register', (_$, e) => ({ value: { tool: `mcp__account-switcher__${e.name}` } }) as never)
   on('command.register', (_$, e) => ({ value: { command: e.name } }) as never)
   on('session.start', () => ({ cwd: '/' }) as never)
@@ -144,7 +154,7 @@ function file(seen: { files: Map<string, string> }, path: string): Record<string
 }
 
 // Account B, saved earlier (as a login with it would have left it).
-function saveB(seen: { files: Map<string, string> }, claudeAiOauth = tokens('b1')): void {
+function saveB(seen: { files: Map<string, string> }, claudeAiOauth = tokens('b1'), autoSwitch = true): void {
   seen.files.set(
     `${STORE}/bbbb-2222.json`,
     JSON.stringify({
@@ -160,6 +170,7 @@ function saveB(seen: { files: Map<string, string> }, claudeAiOauth = tokens('b1'
       updatedAt: '2026-10-01T00:00:00.000Z',
       oauthAccount: ACCOUNT_B,
       claudeAiOauth,
+      autoSwitch,
     }),
   )
 }
@@ -288,6 +299,7 @@ describe('switching', () => {
     expect(String((await call($, 'accounts')).result)).toContain('has NOT allowed you')
 
     await command($, 'auto on')
+    await command($, 'allow alice')
     expect((await call($, 'switch', { account: 'private', reason: 'room' })).deny).toBeUndefined()
     await clock.advance(60_000)
     expect((await call($, 'switch', { account: 'alice@work', reason: 'back' })).deny).toMatch(/wait/)
@@ -527,5 +539,46 @@ describe('names', () => {
     expect(await command($, 'label alice private')).toContain('the label "private" is taken by private')
     expect(await command($, 'save private')).toContain('is taken')
     expect(await command($, 'label alice arbeit')).toContain('Labelled arbeit')
+  })
+})
+
+describe('the allow list', () => {
+  test('to an account off the list the model switches only once the user confirms', async ($, on) => {
+    const { seen } = world(on)
+    saveB(seen, tokens('b1'), false)
+    await $.session.start({ cwd: '/' } as never)
+    expect(String((await call($, 'accounts')).result)).toContain('private – alice@home.example · Alice · pro · model asks first')
+
+    seen.answer = 'Don’t switch'
+    const no = await call($, 'switch', { account: 'private', reason: '5-hour limit at 91%' })
+    expect(no.deny).toMatch(/the user did not confirm the switch to private/)
+    expect(seen.questions[0]).toBe('Switch the Claude account to private (alice@home.example · Alice)? Reason given: 5-hour limit at 91%')
+    expect(file(seen, CREDS).claudeAiOauth.accessToken).toBe('at-a1')
+
+    seen.answer = null // dismissed
+    expect((await call($, 'switch', { account: 'private', reason: 'room' })).deny).toMatch(/did not confirm/)
+
+    seen.answer = 'Switch'
+    const yes = await call($, 'switch', { account: 'private', reason: 'room' })
+    expect(yes.deny).toBeUndefined()
+    expect(file(seen, CREDS).claudeAiOauth.accessToken).toBe('at-b1')
+  })
+
+  test('/account allow puts an account on the list; no dialog then', async ($, on) => {
+    const { seen } = world(on)
+    saveB(seen, tokens('b1'), false)
+    await $.session.start({ cwd: '/' } as never)
+    expect(await command($, 'allow private')).toContain('may now switch to private')
+    expect(file(seen, `${STORE}/bbbb-2222.json`).autoSwitch).toBe(true)
+    expect((await call($, 'switch', { account: 'private', reason: 'room' })).deny).toBeUndefined()
+    expect(seen.questions).toEqual([])
+    expect(await command($, 'ask private')).toContain('now asks you before it switches to private')
+    expect(file(seen, `${STORE}/bbbb-2222.json`).autoSwitch).toBe(false)
+  })
+
+  test('a new login is not on the list until the user puts it there', async ($, on) => {
+    const { seen } = world(on)
+    await $.session.start({ cwd: '/' } as never)
+    expect(file(seen, `${STORE}/aaaa-1111_org-a.json`).autoSwitch).toBeUndefined()
   })
 })
