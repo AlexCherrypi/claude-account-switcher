@@ -92,6 +92,7 @@ const USAGE_FRESH_MS = 3 * MINUTE // a reading this young is shown as it is
 const USAGE_DEMAND_GAP_MS = 30_000 // refresh: true, at most this often per account
 const RENEW_MARGIN_MS = 5 * MINUTE // a token this close to its end is renewed first
 const SYNC_EVERY_MS = 5 * MINUTE
+const LOGIN_LOOKS_MS = [5_000, 15_000, 30_000, 60_000, 2 * MINUTE] // after /login, for the new account
 const HTTP_TIMEOUT_MS = 15_000
 // Past these, an account counts as full (CTM's built-in safety marks).
 const FULL_AT: Record<LimitKind, number> = { five_hour: 95, seven_day: 97 }
@@ -925,6 +926,18 @@ export const register: Register = (on, options) => {
     syncTimer = $.clock.every(SYNC_EVERY_MS, () => void safe(() => serial(() => syncLive($))))
     return next(e)
   })
+
+  // /login replaces the login where Claude Code keeps it: save the account signed in so far
+  // with the tokens it holds now first (they may be newer than its file), and the new one
+  // once the login is through. The login dialog may outlast the command's run, so look again
+  // a few times after it.
+  on('command.run', { command: ['login', 'logout'] }, async ($, e, next) => {
+    await safe(() => serial(() => syncLive($)))
+    const r = await next(e)
+    await safe(() => serial(() => syncLive($)))
+    for (const ms of LOGIN_LOOKS_MS) $.clock.after(ms, () => void safe(() => serial(() => syncLive($))))
+    return r
+  }).catch(($, e, next) => next(e))
 
   on('session.end', async ($, e, next) => {
     await safe(() => serial(() => syncLive($)))

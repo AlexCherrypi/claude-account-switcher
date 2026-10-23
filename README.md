@@ -127,9 +127,18 @@ Your own `/account switch` is never held back by the cooldown or by `auto off`.
 
 ## Adding accounts
 
-Sign in with each account once: `/login`, pick the account, and the plugin saves it on its own
-(`autoSave`, on by default). You can also run `/account save <label>`. Then `/login` with the next
-account. From then on you switch with `/account switch`, without logging in again.
+Just `/login` with each account. The store grows on its own (`autoSave`, on by default):
+
+- Right before `/login` (and `/logout`) the account signed in so far is saved with the tokens it
+  holds **now**. `/login` overwrites them, and Claude Code may have renewed them since the last
+  save.
+- Once the login is through, the new account is saved. The plugin looks 5 s, 15 s, 30 s, 1 min and
+  2 min after the command, because the login dialog can outlast it, and every 5 minutes after
+  that.
+- An account you already have is updated, not saved twice. Its label stays.
+
+`/account save <label>` is only needed to give an account a name (`/account label` does that
+later too). From then on you switch with `/account switch`, without logging in again.
 
 If an account shows **NEEDS A NEW LOGIN**, its refresh token was refused (revoked, or used
 up elsewhere). Sign in with it again (`/login`), and its file is updated.

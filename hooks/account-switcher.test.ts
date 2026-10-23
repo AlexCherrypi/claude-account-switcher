@@ -405,3 +405,34 @@ describe('tokens and record kept apart', () => {
     expect(file(seen, CONFIG).oauthAccount).toEqual(ACCOUNT_B)
   })
 })
+
+describe('/login', () => {
+  const ACCOUNT_C = { accountUuid: 'cccc-3333', emailAddress: 'alice@club.example', organizationUuid: 'org-c', displayName: 'Alice' }
+
+  test('saves the old account with its newest tokens first, then the new one', async ($, on) => {
+    const { seen, clock } = world(on)
+    // The engine's /login: its dialog finishes a moment after the command ran.
+    let loginAt = 0
+    on('command.run', { command: 'login' }, () => {
+      loginAt = NOW + 10_000
+      return { text: 'Login successful' }
+    })
+    await $.session.start({ cwd: '/' } as never)
+    // Claude Code renewed A's tokens since the last sync.
+    seen.files.set(CREDS, JSON.stringify({ claudeAiOauth: tokens('a2'), mcpOAuth: { srv: { token: 'keep-me' } } }))
+    seen.profiles.set('at-a2', ACCOUNT_A.accountUuid)
+    seen.profiles.set('at-c1', ACCOUNT_C.accountUuid)
+    await $.command.run({ command: 'login', args: '' } as never)
+    expect(file(seen, `${STORE}/aaaa-1111.json`).claudeAiOauth.accessToken).toBe('at-a2')
+    expect(loginAt).toBeGreaterThan(0)
+    await clock.advance(10_000)
+    seen.files.set(CREDS, JSON.stringify({ claudeAiOauth: tokens('c1'), mcpOAuth: { srv: { token: 'keep-me' } } }))
+    seen.files.set(CONFIG, JSON.stringify({ oauthAccount: ACCOUNT_C, numStartups: 7 }, null, 2))
+    await clock.advance(6_000)
+    const c = file(seen, `${STORE}/cccc-3333.json`)
+    expect(c.email).toBe('alice@club.example')
+    expect(c.claudeAiOauth.accessToken).toBe('at-c1')
+    expect(file(seen, `${STORE}/aaaa-1111.json`).claudeAiOauth.accessToken).toBe('at-a2')
+    expect(String((await call($, 'accounts')).result)).toContain('Accounts: 2 saved · active: alice@club.example')
+  })
+})
