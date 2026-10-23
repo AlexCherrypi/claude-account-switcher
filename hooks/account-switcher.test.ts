@@ -15,14 +15,29 @@ function tokens(name: string, expiresAt = NOW + 8 * HOUR) {
   return { accessToken: `at-${name}`, refreshToken: `rt-${name}`, expiresAt, scopes: ['user:inference', 'user:profile'], subscriptionType: 'max' }
 }
 
-// The machine beneath the plugin: files, the usage meter and the token endpoint.
-// `usage` maps an access token (or the session's handle) to what the meter answers.
-function world(on: On) {
+type WorldOpts = {
+  // macOS: the login in the keychain; `locked`: the keychain refuses reads.
+  mac?: { locked?: boolean }
+  windows?: boolean
+  env?: Record<string, string>
+}
+
+const LOGIN_A = () => JSON.stringify({ claudeAiOauth: tokens('a1'), mcpOAuth: { srv: { token: 'keep-me' } } })
+
+// The machine beneath the plugin: files, the keychain, the usage meter, the profile and
+// the token endpoint. `usage` maps an access token (or the session's handle) to what the
+// meter answers.
+function world(on: On, opts: WorldOpts = {}) {
   const files = new Map<string, string>()
-  files.set(CREDS, JSON.stringify({ claudeAiOauth: tokens('a1'), mcpOAuth: { srv: { token: 'keep-me' } } }))
+  const keychain = new Map<string, string>() // service -> data
+  if (opts.mac) keychain.set('Claude Code-credentials', LOGIN_A())
+  else if (!opts.windows) files.set(CREDS, LOGIN_A())
   files.set(CONFIG, JSON.stringify({ oauthAccount: ACCOUNT_A, numStartups: 7, projects: { '/x': {} } }, null, 2))
   const seen = {
     files,
+    keychain,
+    // access token -> the account uuid the profile endpoint names
+    profiles: new Map<string, string>(),
     usage: new Map<string, { five_hour: number; seven_day: number }>([
       ['at-a1', { five_hour: 91, seven_day: 40 }],
       ['session', { five_hour: 91, seven_day: 40 }],
@@ -35,7 +50,7 @@ function world(on: On) {
     commands: [] as string[][],
     toasts: [] as string[],
   }
-  mock.env(on, { HOME: '/home/u', USER: 'u' })
+  mock.env(on, opts.windows ? { OS: 'Windows_NT', HOME: '/c/Users/u', USERPROFILE: '/win/Users/u', ...opts.env } : { HOME: '/home/u', USER: 'u', ...opts.env })
   mock.store(on)
   const clock = mock.clock(on, { now: NOW })
   const missing = (path: string) => Object.assign(new Error(`ENOENT: ${path}`), { code: 'ENOENT' })
@@ -48,15 +63,29 @@ function world(on: On) {
     files.set(e.path, e.text)
     return { value: undefined } as never
   })
-  on('fs.exists', (_$, e) => ({ value: files.has(e.path) || [...files.keys()].some(k => k.startsWith(`${e.path}/`)) }) as never)
+  const macPaths = ['/usr/bin/security', '/System/Library/CoreServices']
+  on('fs.exists', (_$, e) => ({ value: (opts.mac !== undefined && macPaths.includes(e.path)) || files.has(e.path) || [...files.keys()].some(k => k.startsWith(`${e.path}/`)) }) as never)
   on('fs.list', (_$, e) => {
     const names = [...files.keys()].filter(k => k.startsWith(`${e.path}/`)).map(k => k.slice(e.path.length + 1)).filter(n => !n.includes('/'))
     return { value: names.map(name => ({ name, kind: 'file', size: 1, mtimeMs: 1, isLink: false })) } as never
   })
   on('process.run', (_$, e) => {
     seen.commands.push([...e.argv])
+    const done = (exitCode: number, stdout = '', stderr = '') => ({ value: { exitCode, stdout, stderr, isStdoutTruncated: false, isStderrTruncated: false } }) as never
     if (e.argv[0] === 'rm') files.delete(e.argv[2]!)
-    return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } } as never
+    if (e.argv[0] === 'security' && e.argv[1] === 'find-generic-password') {
+      if (opts.mac?.locked) return done(36, '', 'security: SecKeychainSearchCopyNext: User interaction is not allowed.')
+      const service = e.argv[e.argv.indexOf('-s') + 1]!
+      const data = keychain.get(service)
+      return data === undefined ? done(44, '', 'The specified item could not be found in the keychain.') : done(0, `${data}\n`)
+    }
+    if (e.argv[0] === 'security' && e.argv[1] === '-i') {
+      const m = /add-generic-password -U -a "([^"]*)" -s "([^"]*)" -X "([0-9a-f]*)"/.exec(String(e.init?.stdin))
+      if (!m) return done(0, '', 'error: unknown command')
+      keychain.set(m[2]!, new TextDecoder().decode(new Uint8Array(m[3]!.match(/../g)!.map(h => parseInt(h, 16)))))
+      return done(0)
+    }
+    return done(0)
   })
   on('session.authorize', () => ({ value: { handle: 'session', kind: 'bearer' } }) as never)
   on('http.fetch', (_$, e) => {
@@ -67,6 +96,11 @@ function world(on: On) {
       const next = seen.renewals.get(body.refresh_token)
       if (!next) return answer(400, { error: 'invalid_grant' })
       return answer(200, { access_token: `at-${next}`, refresh_token: `rt-${next}`, expires_in: 28_800, scope: body.scope })
+    }
+    if (e.url.endsWith('/api/oauth/profile')) {
+      const token = String(e.init?.headers?.Authorization ?? '').replace(/^Bearer /, '')
+      const uuid = seen.profiles.get(token)
+      return uuid ? answer(200, { account: { uuid, email: 'x' }, organization: { uuid: 'o' } }) : answer(401, {})
     }
     if (e.url.endsWith('/api/oauth/usage')) {
       const key = e.init?.auth ?? String(e.init?.headers?.Authorization ?? '').replace(/^Bearer /, '')
@@ -277,5 +311,94 @@ describe('/account', () => {
     expect(await command($, 'switch alice')).toContain('fits 2 accounts')
     expect(await command($, 'switch bob')).toContain('no saved account fits "bob" (saved: private, alice@work.example)')
     expect(await command($, 'switch 1')).toContain('Switched')
+  })
+})
+
+describe('macOS: the login in the keychain, the account record in ~/.claude.json', () => {
+  test('switches the keychain item and the record, and writes no credentials file', async ($, on) => {
+    const { seen } = world(on, { mac: {} })
+    saveB(seen)
+    await $.session.start({ cwd: '/' } as never)
+    expect(file(seen, `${STORE}/aaaa-1111.json`).claudeAiOauth.accessToken).toBe('at-a1')
+    const r = await call($, 'switch', { account: 'private', reason: 'room' })
+    expect(r.deny).toBeUndefined()
+    const item = JSON.parse(seen.keychain.get('Claude Code-credentials')!)
+    expect(item.claudeAiOauth.accessToken).toBe('at-b1')
+    expect(item.mcpOAuth).toEqual({ srv: { token: 'keep-me' } })
+    expect(file(seen, CONFIG).oauthAccount).toEqual(ACCOUNT_B)
+    expect(seen.files.has(CREDS)).toBe(false)
+    // The secret never rides on a command line.
+    expect(seen.commands.some(c => c.includes('-w') && c.some(a => a.includes('at-b1')))).toBe(false)
+  })
+
+  test('a locked keychain is an error, not a missing item: an old file beside it is not taken', async ($, on) => {
+    const { seen } = world(on, { mac: { locked: true } })
+    seen.files.set(CREDS, JSON.stringify({ claudeAiOauth: tokens('stale') }))
+    saveB(seen)
+    const r = await call($, 'switch', { account: 'private', reason: 'room' })
+    expect(r.deny).toMatch(/could not read the macOS keychain item "Claude Code-credentials".*unlocked/)
+    expect(file(seen, CREDS).claudeAiOauth.accessToken).toBe('at-stale')
+    expect(seen.files.has(`${STORE}/aaaa-1111.json`)).toBe(false)
+  })
+
+  test('no keychain item: the file, as Claude Code does', async ($, on) => {
+    const { seen } = world(on, { mac: {} })
+    seen.keychain.clear()
+    seen.files.set(CREDS, LOGIN_A())
+    saveB(seen)
+    expect((await call($, 'switch', { account: 'private', reason: 'room' })).deny).toBeUndefined()
+    expect(file(seen, CREDS).claudeAiOauth.accessToken).toBe('at-b1')
+    expect(seen.keychain.size).toBe(0)
+  })
+
+  test('with CLAUDE_CONFIG_DIR the item name carries the hash of that folder', async ($, on) => {
+    const { seen } = world(on, { mac: {}, env: { CLAUDE_CONFIG_DIR: '/home/u/.claude-work' } })
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('/home/u/.claude-work'))
+    const service = `Claude Code-credentials-${[...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 8)}`
+    expect(await command($, 'where')).toContain(`Keychain item looked for: "${service}" (account "u")`)
+    void seen
+  })
+})
+
+describe('Windows', () => {
+  test('finds the login under USERPROFILE, not a HOME Git Bash set, and runs no chmod', async ($, on) => {
+    const { seen } = world(on, { windows: true })
+    // USERPROFILE is C:\Users\u there; the test engine runs on Unix paths.
+    seen.files.set('/win/Users/u/.claude/.credentials.json', LOGIN_A())
+    seen.files.set('/win/Users/u/.claude.json', seen.files.get(CONFIG)!)
+    seen.files.delete(CONFIG)
+    await $.session.start({ cwd: '/' } as never)
+    expect(seen.files.has('/win/Users/u/.claude/account-switcher/accounts/aaaa-1111.json')).toBe(true)
+    expect(seen.commands.some(c => c[0] === 'chmod')).toBe(false)
+    expect(await command($, 'where')).toContain('System: Windows')
+  })
+})
+
+describe('tokens and record kept apart', () => {
+  test('a record written back by another session is set right, and no file gets the wrong tokens', async ($, on) => {
+    const { seen } = world(on)
+    saveB(seen)
+    await $.session.start({ cwd: '/' } as never)
+    await call($, 'switch', { account: 'private', reason: 'room' })
+    // An older Claude Code session writes its old record back over the switch.
+    seen.files.set(CONFIG, JSON.stringify({ oauthAccount: ACCOUNT_A, numStartups: 8 }, null, 2))
+    const text = String((await call($, 'accounts')).result)
+    expect(file(seen, CONFIG).oauthAccount).toEqual(ACCOUNT_B)
+    expect(file(seen, CONFIG).numStartups).toBe(8)
+    expect(file(seen, `${STORE}/aaaa-1111.json`).claudeAiOauth.accessToken).toBe('at-a1')
+    expect(text).toContain('active: private')
+  })
+
+  test('renewed tokens are filed under the account the server names', async ($, on) => {
+    const { seen } = world(on)
+    saveB(seen)
+    await $.session.start({ cwd: '/' } as never)
+    // Claude Code renewed B's tokens, but the record still names A.
+    seen.files.set(CREDS, JSON.stringify({ claudeAiOauth: tokens('b9') }))
+    seen.profiles.set('at-b9', ACCOUNT_B.accountUuid)
+    expect(String(await command($, 'save'))).toContain('private')
+    expect(file(seen, `${STORE}/bbbb-2222.json`).claudeAiOauth.accessToken).toBe('at-b9')
+    expect(file(seen, `${STORE}/aaaa-1111.json`).claudeAiOauth.accessToken).toBe('at-a1')
+    expect(file(seen, CONFIG).oauthAccount).toEqual(ACCOUNT_B)
   })
 })

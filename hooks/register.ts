@@ -185,8 +185,12 @@ async function isWindows($: EngineInterface): Promise<boolean> {
   return (await safe(() => $.env.get('OS'))) === 'Windows_NT'
 }
 
+// The home folder as Claude Code's os.homedir() sees it: USERPROFILE on Windows (where a
+// HOME set by Git Bash or MSYS may point elsewhere), HOME everywhere else.
 async function home($: EngineInterface): Promise<string | null> {
-  const h = (await safe(() => $.env.get('HOME'))) || (await safe(() => $.env.get('USERPROFILE')))
+  const h = (await isWindows($))
+    ? (await safe(() => $.env.get('USERPROFILE'))) || (await safe(() => $.env.get('HOME')))
+    : (await safe(() => $.env.get('HOME'))) || (await safe(() => $.env.get('USERPROFILE')))
   return h ? trimSlash(h) : null
 }
 
@@ -236,33 +240,58 @@ async function credentialsFile($: EngineInterface): Promise<string | null> {
 
 // ---------------------------------------------------------------- The live login
 
-async function keychainRead($: EngineInterface, service: string, user: string): Promise<string | null> {
-  const r = await safe(() => $.process.run(['security', 'find-generic-password', '-a', user, '-w', '-s', service], { timeoutMs: 10_000 }))
-  if (!r || r.exitCode !== 0) return null
+// `security` exits 44 when no such item is there (errSecItemNotFound).
+const SECURITY_NOT_FOUND = 44
+
+type KeychainRead = { text: string } | { missing: true } | { error: string }
+
+async function keychainRead($: EngineInterface, service: string, user: string): Promise<KeychainRead> {
+  let r
+  try {
+    r = await $.process.run(['security', 'find-generic-password', '-a', user, '-w', '-s', service], { timeoutMs: 10_000 })
+  } catch (err) {
+    return { error: errorText(err) }
+  }
+  if (r.exitCode === SECURITY_NOT_FOUND) return { missing: true }
+  if (r.exitCode !== 0) return { error: `security exited ${r.exitCode}${r.stderr.trim() ? `: ${r.stderr.trim().slice(0, 200)}` : ''}` }
   const out = r.stdout.trim()
-  if (!out) return null
+  if (!out) return { missing: true }
   // `security -w` prints the data as hex when it is not plain text.
-  return out.startsWith('{') || !/^[0-9a-f]+$/i.test(out) ? out : fromHex(out)
+  return { text: out.startsWith('{') || !/^[0-9a-f]+$/i.test(out) ? out : fromHex(out) }
 }
 
 async function keychainWrite($: EngineInterface, service: string, user: string, text: string): Promise<void> {
-  // Through `security -i`, so the secret is never on a command line.
+  // Through `security -i`, as Claude Code itself does, so the secret is never on a command line.
   const q = (s: string) => `"${s.replace(/(["\\])/g, '\\$1')}"`
   const r = await $.process.run(['security', '-i'], {
     stdin: `add-generic-password -U -a ${q(user)} -s ${q(service)} -X ${q(toHex(text))}\n`,
     timeoutMs: 10_000,
   })
-  if (r.exitCode !== 0) throw new Error(`the keychain refused the write (security exited ${r.exitCode}): ${r.stderr.trim().slice(0, 200)}`)
+  // `security -i` can exit 0 and still print the refusal of a command it ran.
+  if (r.exitCode !== 0 || /error|denied|not allowed/i.test(r.stderr)) {
+    throw new Error(`the keychain refused the write (security exited ${r.exitCode}): ${r.stderr.trim().slice(0, 200)}`)
+  }
+}
+
+// The keychain account Claude Code files its item under: $USER, else the login name.
+async function keychainUser($: EngineInterface): Promise<string> {
+  const user = await safe(() => $.env.get('USER'))
+  if (user) return user
+  const r = await safe(() => $.process.run(['id', '-un'], { timeoutMs: 5_000 }))
+  return (r?.exitCode === 0 && r.stdout.trim()) || 'claude-code-user'
 }
 
 async function readBackend($: EngineInterface): Promise<{ backend: Backend; text: string | null }> {
   const file = await credentialsFile($)
   if (await isMac($)) {
-    const user = (await safe(() => $.env.get('USER'))) || 'claude-code-user'
+    const user = await keychainUser($)
     const service = await keychainService($)
-    const text = await keychainRead($, service, user)
-    if (text !== null) return { backend: { kind: 'keychain', service, user }, text }
-    // No keychain item: Claude Code falls back to the file there too.
+    const r = await keychainRead($, service, user)
+    if ('text' in r) return { backend: { kind: 'keychain', service, user }, text: r.text }
+    // A locked keychain, or one that refused us, is no missing item: the file beside it
+    // may be an old one, and taking it for the login would save or switch the wrong tokens.
+    if ('error' in r) throw new Error(`could not read the macOS keychain item "${service}" (${r.error}) – is the keychain unlocked?`)
+    // No keychain item: Claude Code keeps its login in the file then, as on Linux.
   }
   if (!file) throw new Error('cannot tell where Claude Code keeps its login (neither HOME nor CLAUDE_CONFIG_DIR is set)')
   const text = (await safe(() => $.fs.exists(file))) ? ((await safe(() => $.fs.read(file))) as string | undefined) ?? null : null
@@ -373,14 +402,64 @@ function accountFrom(oauthAccount: Record<string, unknown>, tokens: OAuthTokens,
   }
 }
 
+function sameTokens(a: OAuthTokens, b: OAuthTokens): boolean {
+  return a.accessToken === b.accessToken || (Boolean(a.refreshToken) && a.refreshToken === b.refreshToken)
+}
+
+// Who the server says a token belongs to (GET /api/oauth/profile); null where it does not
+// answer. Never renews anything.
+async function profileOwner($: EngineInterface, tokens: OAuthTokens): Promise<string | null> {
+  if (expired(tokens, await now($))) return null
+  const r = await safe(() => fetchJson($, `${API}/api/oauth/profile`, { headers: usageHeaders(tokens.accessToken) }))
+  if (!r?.ok) return null
+  try {
+    const body = JSON.parse(r.text)
+    return str(body?.account?.uuid)
+  } catch {
+    return null
+  }
+}
+
+// Whose tokens the login holds. The tokens (keychain or .credentials.json) and the account
+// record (~/.claude.json) are two places: a Claude Code that still held the old record can
+// write it back after a switch, and saving by the record alone would then file one
+// account's tokens under another. Tokens that are a saved account's own pair are its; new
+// ones (Claude Code renewed them, or a new login) are asked of the server.
+async function ownerOf($: EngineInterface, tokens: OAuthTokens, recordUuid: string, accounts: Account[]): Promise<string | null> {
+  const known = accounts.find(a => sameTokens(a.data.claudeAiOauth, tokens))
+  if (known) return known.data.accountUuid
+  return (await profileOwner($, tokens)) ?? recordUuid
+}
+
+// Puts the owner's account record back into ~/.claude.json, so the record matches the
+// tokens again (and CTM, which reads the record, sees the right account).
+async function healRecord($: EngineInterface, live: Live, owner: Account): Promise<void> {
+  const config = await readGlobalConfig($, live.configPath)
+  config.oauthAccount = owner.data.oauthAccount
+  await $.fs.write(live.configPath, `${JSON.stringify(config, null, 2)}\n`)
+  live.oauthAccount = owner.data.oauthAccount
+  toast($, `Account: ~/.claude.json named another account than the login – set back to ${shortName(owner.data)}`)
+}
+
 // Writes the live login into its account's file: the tokens Claude Code holds now (it
 // renews them now and then) and its oauthAccount. A new account is saved only with
 // `create` (or autoSave). Answers the account, or null where nothing was saved.
 async function syncLive($: EngineInterface, { create = false, label }: { create?: boolean; label?: string } = {}): Promise<{ account: Account | null; live: Live; created: boolean }> {
   const live = await readLive($)
-  const uuid = accountUuid(live.oauthAccount)
+  let uuid = accountUuid(live.oauthAccount)
   if (!uuid || !live.tokens || !live.oauthAccount) return { account: null, live, created: false }
   const accounts = await listAccounts($)
+  const recorded = accounts.find(a => a.data.accountUuid === uuid)
+  if (!recorded || !sameTokens(recorded.data.claudeAiOauth, live.tokens)) {
+    const owner = await ownerOf($, live.tokens, uuid, accounts)
+    if (owner && owner !== uuid) {
+      const saved = accounts.find(a => a.data.accountUuid === owner)
+      // Tokens of an account never saved, under another's record: nothing to file them under.
+      if (!saved) return { account: null, live, created: false }
+      await healRecord($, live, saved)
+      uuid = owner
+    }
+  }
   const existing = accounts.find(a => a.data.accountUuid === uuid)
   if (!existing && !create && !autoSave) return { account: null, live, created: false }
   const dir = await storeDir($)
@@ -662,6 +741,37 @@ async function overview($: EngineInterface, { refresh }: { refresh: boolean }): 
   return lines.join('\n')
 }
 
+// Where this machine keeps what: for /account where, to check a new system by hand.
+async function whereReport($: EngineInterface): Promise<string> {
+  const lines: string[] = []
+  const windows = await isWindows($)
+  const mac = await isMac($)
+  lines.push(`System: ${windows ? 'Windows' : mac ? 'macOS' : 'Linux / other Unix'}`)
+  lines.push(`Home: ${(await home($)) ?? '(none – neither HOME nor USERPROFILE is set)'}`)
+  lines.push(`Claude config dir: ${(await configDir($)) ?? '?'}`)
+  if (mac) lines.push(`Keychain item looked for: "${await keychainService($)}" (account "${await keychainUser($)}")`)
+  lines.push(`Credentials file${mac ? ' (used where the keychain has no item)' : ''}: ${(await credentialsFile($)) ?? '?'}`)
+  lines.push(`Account record: ${(await globalConfigPath($)) ?? '?'} (oauthAccount – CTM reads it too)`)
+  lines.push(`Account store: ${(await storeDir($)) ?? '?'}`)
+  try {
+    const live = await readLive($)
+    lines.push(
+      `Login found in: ${live.backend.kind === 'keychain' ? `the macOS keychain ("${live.backend.service}")` : live.backend.path}` +
+        (live.tokens ? '' : ' – but it holds no claude.ai tokens (an API key, a cloud provider, or not signed in)'),
+    )
+    const uuid = accountUuid(live.oauthAccount)
+    lines.push(`Account record names: ${uuid ? `${str(live.oauthAccount?.emailAddress) ?? '?'} (${uuid})` : 'no account'}`)
+    if (live.tokens && uuid) {
+      const accounts = await listAccounts($)
+      const owner = await ownerOf($, live.tokens, uuid, accounts)
+      lines.push(owner === uuid ? 'Tokens and record agree.' : `Tokens belong to ${owner} – the record names another account (the next sync sets it right where that account is saved).`)
+    }
+  } catch (err) {
+    lines.push(`Could not read the login: ${errorText(err)}`)
+  }
+  return lines.join('\n')
+}
+
 type SwitchBy = { by: 'model' | 'person'; reason?: string }
 
 async function switchTo($: EngineInterface, query: string, how: SwitchBy): Promise<string> {
@@ -712,6 +822,9 @@ async function switchTo($: EngineInterface, query: string, how: SwitchBy): Promi
     }
     const at = await now($)
     if (how.by === 'model') lastModelSwitchAt = at
+    // A Claude Code session that still held the old record may write it back soon after:
+    // look again a few times (syncLive puts the right record back).
+    for (const ms of [10_000, 30_000, 60_000, 120_000]) $.clock.after(ms, () => void safe(() => serial(() => syncLive($))))
     const from = current ? describe(current.data) : 'no saved account'
     toast($, `Account: switched to ${shortName(target.data)}${how.by === 'model' ? ' (by the model)' : ''}`)
     return [
@@ -793,8 +906,8 @@ export const register: Register = (on, options) => {
     await safe(() =>
       $.command.register({
         name: 'account',
-        description: 'Claude accounts: /account lists them with their limits · save [label] · switch <name> · label <name> <label> · remove <name> · auto on|off',
-        argumentHint: '[list|save|switch|label|remove|auto] …',
+        description: 'Claude accounts: /account lists them with their limits · save [label] · switch <name> · label <name> <label> · remove <name> · auto on|off · where',
+        argumentHint: '[list|save|switch|label|remove|auto|where] …',
       }),
     )
     await ensureSettings($)
@@ -868,7 +981,7 @@ export const register: Register = (on, options) => {
     const args = e.args.trim()
     const [verb = 'list', ...rest] = args.split(/\s+/).filter(Boolean)
     const tail = rest.join(' ')
-    const usage = 'Usage: /account [list|usage] · /account save [label] · /account switch <name> · /account label <name> <label> · /account remove <name> · /account auto on|off|default'
+    const usage = 'Usage: /account [list|usage|where] · /account save [label] · /account switch <name> · /account label <name> <label> · /account remove <name> · /account auto on|off|default'
     try {
       switch (verb.toLowerCase()) {
         case 'list':
@@ -914,6 +1027,9 @@ export const register: Register = (on, options) => {
           if (r.exitCode !== 0) return { text: `Could not remove ${found.path}: ${r.stderr.trim()}` }
           return { text: `Removed ${describe(found.data)} (its file is gone; its login elsewhere is untouched).` }
         }
+        case 'where':
+        case 'doctor':
+          return { text: await whereReport($) }
         case 'auto': {
           const v = tail.toLowerCase()
           if (!['on', 'off', 'default'].includes(v)) return { text: `The model may switch on its own: ${(await modelMaySwitch($)) ? 'yes' : 'no'}. ${usage}` }

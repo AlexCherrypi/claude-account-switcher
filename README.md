@@ -40,6 +40,40 @@ them.
 The switch applies to the **whole machine**: every Claude Code session that uses the same config
 dir runs on the new account from then on.
 
+## Platforms
+
+Claude Code keeps a login in two places. The plugin reads and writes both on every system:
+
+| | Tokens (`claudeAiOauth`) | Account record (`oauthAccount`) |
+|---|---|---|
+| **macOS** | Keychain item `Claude Code-credentials` (with `-<hash>` behind it when `CLAUDE_CONFIG_DIR` is set), account `$USER`; read and written with `/usr/bin/security`, as Claude Code does, the secret over stdin. If the keychain has no item, `~/.claude/.credentials.json`. | `~/.claude.json` |
+| **Linux** | `~/.claude/.credentials.json` | `~/.claude.json` |
+| **Windows** | `%USERPROFILE%\.claude\.credentials.json` (`USERPROFILE`, not a `HOME` that Git Bash set) | `%USERPROFILE%\.claude.json` |
+| **iOS** | Claude Code does not run there. The app drives a cloud session (its login belongs to the host and can't be switched) or, through Remote Control, a session on your computer. There the plugin runs as on that computer. | |
+
+With `CLAUDE_CONFIG_DIR` set, both live in that folder instead.
+
+- **Tokens and record must agree.** CTM, and Claude Code's own displays, read the account from
+  `~/.claude.json`. A Claude Code session that still holds the old record can write it back after
+  a switch. So before the plugin saves tokens to an account's file, it checks whose they are: a
+  saved account's own pair is that account's, and new tokens (Claude Code renewed them, or you
+  logged in again) are asked of the server (`/api/oauth/profile`). If the record names another
+  account, it is set back to the right one, never the other way round. The plugin looks again 10 s,
+  30 s, 1 min and 2 min after a switch, and every 5 minutes.
+- **A locked keychain** (e.g. over SSH) is reported as an error. The plugin then does not fall back
+  to a `.credentials.json` that may be old.
+- **`/account where`** shows what the plugin found on your machine: the system, the paths, the
+  keychain item, where the login is, and whether tokens and record agree.
+
+### Checking a new system by hand
+
+1. `/account where`: the login is found, and tokens and record agree.
+2. `/account save first`, then `/login` with a second account, then `/account`: both are listed.
+3. `/account usage`: both show their limits.
+4. `/account switch first`, then `/status` (or CTM's next block): the first account is active, and
+   a prompt works without a new login.
+5. Switch back and forth a few times, with a second Claude Code session open: both keep working.
+
 ## Limits without switching
 
 For the active account the limits are read with the session's own credential. For every other
@@ -86,6 +120,7 @@ carries on instead of pausing. If it may not, it tells you which account has roo
 /account label <name> <label> set or (no label) remove a label
 /account remove <name>        delete an account's file (not the active one)
 /account auto on|off|default  let the model switch on its own, or not
+/account where                where this machine keeps the login, and whether it is consistent
 ```
 
 Your own `/account switch` is never held back by the cooldown or by `auto off`.
