@@ -129,6 +129,11 @@ Each account says whether the model may switch to it on its own:
   (`pluginConfigs` → `account-switcher` → `options` → `alwaysAsk`), where neither the user nor the
   model can change it.
 
+**The settings pane.** `/account settings` opens a pane with one row per account: its short name,
+email, organization, last limits and level. **Tab** (or the arrows) moves from account to
+account. **Enter** steps the level on: *switch freely → ask first → never*, skipping *switch
+freely* where asking is enforced. **Esc** closes it.
+
 `/account` shows each account as *model may switch here*, *model asks first*, *model asks first
 (enforced)* or *model may NOT switch here*.
 
@@ -170,6 +175,7 @@ organizations. A label another account already carries is refused.
 /account switch <name>        switch (label, email, name, number or uuid; a unique part is enough)
 /account label <name> <label> set or (no label) remove a label
 /account remove <name>        delete an account's file (not the active one)
+/account settings             a pane: Tab between accounts, Enter changes what the model may do
 /account allow <name>         let the model switch to this account on its own
 /account ask <name>           the model asks you before it switches to this account (the default)
 /account block <name>         the model may never switch to this account (you still can)

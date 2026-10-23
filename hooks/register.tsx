@@ -1,4 +1,6 @@
+import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
+import type { AccountRow } from '../types'
 
 // Account switcher
 //
@@ -756,6 +758,77 @@ function bestOther(readings: Reading[], activeUuid: string | null, at: number): 
   return candidates[0] ?? null
 }
 
+// ---------------------------------------------------------------- Levels and the settings pane
+
+type Level = AccountRow['level']
+
+function levelOf(a: AccountFile): Level {
+  return a.modelBlocked ? 'block' : a.autoSwitch && !mustAsk(a) ? 'allow' : 'ask'
+}
+
+// Sets what the model may do for one account; refuses `allow` on the alwaysAsk list.
+// Answers what changed, in a sentence, or the refusal.
+async function setLevel($: EngineInterface, account: Account, level: Level): Promise<{ text: string; refused?: true }> {
+  if (level === 'allow' && mustAsk(account.data)) {
+    return {
+      refused: true,
+      text:
+        `${describe(account.data)} is on the always-ask list (option alwaysAsk): the model must ask you before it ` +
+        'switches there, and that cannot be lifted here. Change the option (or, if your organization set it, ask them).',
+    }
+  }
+  account.data.autoSwitch = level === 'allow'
+  account.data.modelBlocked = level === 'block'
+  await writeAccount($, account)
+  return {
+    text:
+      level === 'allow'
+        ? `The model may now switch to ${describe(account.data)} on its own.`
+        : level === 'ask'
+          ? `The model now asks you before it switches to ${describe(account.data)}.`
+          : `The model may no longer switch to ${describe(account.data)} at all, not even by asking. You still can (/account switch).`,
+  }
+}
+
+// Enter on a row: on to the next level, past `allow` where asking is enforced.
+function nextLevel(level: Level, enforced: boolean): Level {
+  const order: Level[] = enforced ? ['ask', 'block'] : ['allow', 'ask', 'block']
+  return order[(order.indexOf(level) + 1) % order.length] ?? 'ask'
+}
+
+const LEVEL_TEXT: Record<Level, string> = {
+  allow: 'switch freely',
+  ask: 'ask first',
+  block: 'never',
+}
+
+const PANE = 'account-switcher'
+const rows = atom({ plugin: 'account-switcher', key: 'rows' } as const, [] as AccountRow[], { shape: 'rows-1' })
+
+// What the pane draws, from the account files (their last readings: no server request).
+async function refreshRows($: EngineInterface): Promise<void> {
+  const accounts = await listAccounts($)
+  await ensureLabels($, accounts)
+  const live = await safe(() => readLive($))
+  const activeKey = keyOf(live?.oauthAccount ?? null)
+  const at = await now($)
+  const list: AccountRow[] = accounts.map(a => ({
+    key: keyOfFile(a.data),
+    name: shortName(a.data),
+    who: [a.data.email, a.data.organizationName, a.data.subscriptionType].filter(Boolean).join(' · '),
+    level: levelOf(a.data),
+    enforced: mustAsk(a.data),
+    active: keyOfFile(a.data) === activeKey,
+    limits: (a.data.lastUsage ? fmtLimits(a.data.lastUsage, at) : 'limits not read yet') + (a.data.lastUsage && isFull(a.data.lastUsage, at) ? ' · FULL' : ''),
+  }))
+  await update($, rows, () => list)
+}
+
+async function openPane($: EngineInterface): Promise<void> {
+  await refreshRows($)
+  await $.ui.open({ id: PANE, title: 'Accounts', focus: true, closeOnEscape: true })
+}
+
 // ---------------------------------------------------------------- Guarding the store
 
 const STORE_DENIED =
@@ -995,6 +1068,7 @@ async function switchTo($: EngineInterface, query: string, how: SwitchBy): Promi
     for (const ms of [10_000, 30_000, 60_000, 120_000]) $.clock.after(ms, () => void safe(() => serial(() => syncLive($))))
     const from = current ? describe(current.data) : 'no saved account'
     toast($, `Account: switched to ${shortName(target.data)}${how.by === 'model' ? ' (by the model)' : ''}`)
+    void safe(() => refreshRows($)) // the settings pane, where it is open
     return [
       `Switched from ${from} to ${describe(target.data)}.${how.reason ? ` Reason: ${how.reason}` : ''}`,
       `Its limits: ${fmtLimits(reading?.usage ?? null, at)}${reading?.error ? ` (could not read anew: ${reading.error})` : ''}.`,
@@ -1079,8 +1153,8 @@ export const register: Register = (on, options) => {
     await safe(() =>
       $.command.register({
         name: 'account',
-        description: 'Claude accounts: /account lists them with their limits · switch <name> · allow|ask|block <name> · save [label] · label <name> <label> · remove <name> · auto on|off · where',
-        argumentHint: '[list|switch|allow|ask|block|save|label|remove|auto|where] …',
+        description: 'Claude accounts: /account lists them with their limits · settings (a pane) · switch <name> · allow|ask|block <name> · save [label] · label <name> <label> · remove <name> · auto on|off · where',
+        argumentHint: '[list|settings|switch|allow|ask|block|save|label|remove|auto|where] …',
       }),
     )
     await ensureSettings($)
@@ -1199,6 +1273,40 @@ export const register: Register = (on, options) => {
     }
   }).catch(($, e, next) => (next.called ? next(e) : { deny: 'Account switcher: could not save the account.' }))
 
+  // ---------------------------------------------------------------- The settings pane
+
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    const { Box, Text, Button } = $.ui.resolve(e)
+    const list = await read($, rows)
+    const change = (row: AccountRow) => async () => {
+      const accounts = await listAccounts($)
+      const account = accounts.find(a => keyOfFile(a.data) === row.key)
+      if (!account) return refreshRows($)
+      const r = await setLevel($, account, nextLevel(levelOf(account.data), mustAsk(account.data)))
+      if (r.refused) toast($, r.text)
+      await refreshRows($)
+    }
+    return (
+      <Box flexDirection="column">
+        <Text bold>What the model may do per account</Text>
+        <Text dimColor>Tab / arrows: next account · Enter: change · Esc: close</Text>
+        {list.length === 0 && <Text dimColor>No account saved yet – sign in with /login, it is saved on its own.</Text>}
+        {list.map((row, i) => (
+          <Box key={`row-${row.key}`} flexDirection="column" marginTop={1}>
+            <Button key={row.key} plain autoFocus={i === 0 ? true : undefined} onPress={change(row)}>
+              {row.active ? '▶ ' : '○ '}
+              {row.name} <Text dimColor>{row.who}</Text>
+              {'  '}
+              <Text bold>[{LEVEL_TEXT[row.level]}{row.enforced && row.level === 'ask' ? ', enforced' : ''}]</Text>
+            </Button>
+            <Text dimColor>└ {row.limits}</Text>
+          </Box>
+        ))}
+        <Text dimColor>switch freely: at once · ask first: a dialog asks you · never: only you can switch there</Text>
+      </Box>
+    )
+  })
+
   // ---------------------------------------------------------------- The store is not the model's
 
   // The account files hold every saved login, and the allow list beside it: the model reads
@@ -1222,7 +1330,7 @@ export const register: Register = (on, options) => {
     const args = e.args.trim()
     const [verb = 'list', ...rest] = args.split(/\s+/).filter(Boolean)
     const tail = rest.join(' ')
-    const usage = 'Usage: /account [list|usage|where] · /account allow|ask|block <name> · /account save [label] · /account switch <name> · /account label <name> <label> · /account remove <name> · /account auto on|off|default'
+    const usage = 'Usage: /account [list|usage|settings|where] · /account allow|ask|block <name> · /account save [label] · /account switch <name> · /account label <name> <label> · /account remove <name> · /account auto on|off|default'
     try {
       switch (verb.toLowerCase()) {
         case 'list':
@@ -1278,25 +1386,15 @@ export const register: Register = (on, options) => {
           await ensureLabels($, accounts)
           const found = findAccount(accounts, tail)
           if ('error' in found) return { text: found.error }
-          const how = verb.toLowerCase()
-          if (how === 'allow' && mustAsk(found.data)) {
-            return {
-              text:
-                `${describe(found.data)} is on the always-ask list (option alwaysAsk): the model must ask you before it ` +
-                'switches there, and /account allow cannot lift that. Change the option (or, if your organization set it, ask them).',
-            }
-          }
-          found.data.autoSwitch = how === 'allow'
-          found.data.modelBlocked = how === 'block'
-          await writeAccount($, found)
-          const text =
-            how === 'allow'
-              ? `The model may now switch to ${describe(found.data)} on its own.`
-              : how === 'ask'
-                ? `The model now asks you before it switches to ${describe(found.data)}.`
-                : `The model may no longer switch to ${describe(found.data)} at all, not even by asking. You still can (/account switch).`
+          const r = await setLevel($, found, verb.toLowerCase() as Level)
+          if (r.refused) return { text: r.text }
+          const text = r.text
           return { text, context: [`The user changed this with /account ${verb}: ${text}`] }
         }
+        case 'settings':
+        case 'ui':
+          await openPane($)
+          return { text: 'Account settings opened: Tab or arrows move between accounts, Enter changes what the model may do, Esc closes.' }
         case 'where':
         case 'doctor':
           return { text: await whereReport($) }

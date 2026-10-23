@@ -146,6 +146,7 @@ function world(on: On, opts: WorldOpts = {}) {
   on('tool.register', (_$, e) => ({ value: { tool: `mcp__account-switcher__${e.name}` } }) as never)
   on('command.register', (_$, e) => ({ value: { command: e.name } }) as never)
   on('session.start', () => ({ cwd: '/' }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
   return { seen, clock }
 }
 
@@ -662,5 +663,46 @@ describe('the store is not the model\'s', () => {
     expect((await $.tool.call({ tool: 'Read', file_path: '/home/u/notes.md' } as never)).result).toBe('ran')
     expect((await $.tool.call({ tool: 'Bash', command: 'ls ~/.claude' } as never)).result).toBe('ran')
     void seen
+  })
+})
+
+describe('the settings pane', () => {
+  const PANE = {
+    plugin: 'account-switcher',
+    component: 'Pane',
+    requestId: 'account-switcher',
+    props: { title: 'Accounts', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
+  } as const
+
+  test('Enter on an account steps through switch freely, ask first, never – on every surface', { options: { alwaysAsk: 'Work Inc' } }, async ($, on) => {
+    const { seen } = world(on)
+    saveB(seen, tokens('b1'), false)
+    await $.session.start({ cwd: '/' } as never)
+    await call($, 'accounts') // reads the limits the pane shows
+    expect(await command($, 'settings')).toContain('Account settings opened')
+
+    for (const surface of ['terminal', 'desktop'] as const) {
+      const ui = await $.ui.mount({ ...PANE, surface } as never)
+      const row = async (key: string) => (await ui.find({ type: 'Button', key } as never)) as { text?: string } | undefined
+      expect((await row('bbbb-2222|org-b'))?.text).toMatch(/private .*alice@home\.example.*\[ask first\]/)
+      expect((await row('aaaa-1111|org-a'))?.text).toMatch(/▶ alice .*\[ask first, enforced\]/)
+      expect((await ui.find({ type: 'Text', text: /5-hour 91%/ } as never))).toBeTruthy()
+
+      await ui.press({ key: 'bbbb-2222|org-b' } as never)
+      expect(file(seen, `${STORE}/bbbb-2222.json`).modelBlocked).toBe(true)
+      expect((await row('bbbb-2222|org-b'))?.text).toMatch(/\[never\]/)
+      await ui.press({ key: 'bbbb-2222|org-b' } as never)
+      expect(file(seen, `${STORE}/bbbb-2222.json`).autoSwitch).toBe(true)
+      expect((await row('bbbb-2222|org-b'))?.text).toMatch(/\[switch freely\]/)
+      await ui.press({ key: 'bbbb-2222|org-b' } as never)
+      expect((await row('bbbb-2222|org-b'))?.text).toMatch(/\[ask first\]/)
+
+      // Asking is enforced for alice: the steps skip "switch freely".
+      await ui.press({ key: 'aaaa-1111|org-a' } as never)
+      expect((await row('aaaa-1111|org-a'))?.text).toMatch(/\[never\]/)
+      await ui.press({ key: 'aaaa-1111|org-a' } as never)
+      expect((await row('aaaa-1111|org-a'))?.text).toMatch(/\[ask first, enforced\]/)
+      await ui.unmount()
+    }
   })
 })
