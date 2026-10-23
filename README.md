@@ -213,6 +213,17 @@ later too). From then on you switch with `/account switch`, without logging in a
 If an account shows **NEEDS A NEW LOGIN**, its refresh token was refused (revoked, or used
 up elsewhere). Sign in with it again (`/login`), and its file is updated.
 
+## Languages
+
+What you read comes in **English, German or French**: `/account` and its subcommands, the
+settings pane, the toasts, and the dialog that asks before a switch. The language is the
+`language` option if set, else Claude Code's own `language` setting, else the system's (`LANG`,
+`LC_ALL`), and English otherwise. Any text missing in a language falls back to English.
+
+What the model reads stays English: the tool descriptions, its tool results and its briefing.
+It reads that most reliably, and the words it matches on ("model may switch here") stay the same
+whatever you read.
+
 ## Options (`/plugin` → account-switcher → configure, or `/config`)
 
 | Option | Default | Meaning |
@@ -220,6 +231,7 @@ up elsewhere). Sign in with it again (`/login`), and its file is updated.
 | `allowModelSwitch` | true | The model may switch on its own (`/account auto` overrides it, kept across sessions) |
 | `switchCooldownMinutes` | 5 | Minimum time between two switches by the model, 0 = none |
 | `alwaysAsk` | empty | Emails, `@domains` or organization names the model must always ask for (see [Allow list](#allow-list)) |
+| `language` | auto | `auto`, `en`, `de` or `fr`: the language of what you read (see [Languages](#languages)) |
 | `autoSave` | true | Save every new account you sign in with on its own. A saved account's file is always kept current as Claude Code renews its tokens (checked every 5 minutes, and at every switch and session end) |
 | `storeDir` | empty | Folder for the account files; empty = `<config dir>/account-switcher/accounts` |
 | `keychainService` | empty | macOS only: the keychain item Claude Code uses, if it isn't the detected one (`Claude Code-credentials`, plus `-<hash>` when `CLAUDE_CONFIG_DIR` is set) |

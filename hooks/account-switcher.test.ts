@@ -729,9 +729,9 @@ describe('managing accounts in the pane', () => {
     expect(await button('remove:aaaa-1111|org-a')).toBeUndefined()
 
     // Rename.
-    await ui.input({ key: 'label:bbbb-2222|org-b', text: 'home' } as never)
+    await (ui as unknown as { input: (a: unknown) => Promise<unknown> }).input({ key: 'label:bbbb-2222|org-b', text: 'home' } as never)
     expect(file(seen, `${STORE}/bbbb-2222.json`).label).toBe('home')
-    await ui.input({ key: 'label:bbbb-2222|org-b', text: 'alice' } as never)
+    await (ui as unknown as { input: (a: unknown) => Promise<unknown> }).input({ key: 'label:bbbb-2222|org-b', text: 'alice' } as never)
     expect(seen.toasts.some(t => t.includes('the label "alice" is taken'))).toBe(true)
     expect(file(seen, `${STORE}/bbbb-2222.json`).label).toBe('home')
 
@@ -762,5 +762,64 @@ describe('managing accounts in the pane', () => {
     await ui.press({ key: 'bbbb-2222|org-b' } as never)
     expect(file(seen, `${STORE}/bbbb-2222.json`).modelBlocked).toBe(true)
     await ui.unmount()
+  })
+})
+
+describe('languages', () => {
+  test('German: /account, the dialog and the pane speak German; the model still reads English', { options: { language: 'de' } }, async ($, on) => {
+    const { seen } = world(on)
+    saveB(seen, tokens('b1'), false)
+    await $.session.start({ cwd: '/' } as never)
+    const list = await command($, '')
+    expect(list).toContain('Accounts: 2 gespeichert · aktiv: alice (alice@work.example')
+    expect(list).toContain('KI fragt erst')
+    expect(list).toMatch(/5-Stunden 91 ?% \(Reset in 2 Std\. 0 Min\.\)/)
+    expect(list).toContain('Die KI wechselt von selbst zu Accounts mit')
+
+    // The model's own list stays English.
+    const forModel = String((await call($, 'accounts')).result)
+    expect(forModel).toContain('Accounts: 2 saved · active:')
+    expect(forModel).toContain('You may switch on your own')
+
+    // The dialog asks in German, and its German "Switch" switches.
+    seen.answer = 'Wechseln'
+    const r = await call($, 'switch', { account: 'private', reason: '5h voll' })
+    expect(seen.questions[0]).toBe('Den Claude-Account zu private (alice@home.example · Alice) wechseln? Angegebener Grund: 5h voll')
+    expect(r.deny).toBeUndefined()
+    expect(String(r.result)).toContain('Switched from') // the model's answer: English
+    expect(seen.toasts).toContain('Account: gewechselt zu private (durch die KI)')
+
+    expect(await command($, 'switch nobody')).toContain('Kein gespeicherter Account passt zu „nobody“')
+    expect(await command($, 'block alice')).toContain('Die KI darf gar nicht mehr zu alice')
+  })
+
+  test('French in the pane', { options: { language: 'fr' } }, async ($, on) => {
+    const { seen } = world(on)
+    saveB(seen, tokens('b1'), false)
+    await $.session.start({ cwd: '/' } as never)
+    await command($, 'settings')
+    const ui = await $.ui.mount({
+      plugin: 'account-switcher',
+      component: 'Pane',
+      requestId: 'account-switcher',
+      surface: 'desktop',
+      props: { title: 'Comptes', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
+    } as never)
+    expect((await ui.find({ type: 'Button', key: 'bbbb-2222|org-b' } as never) as { text?: string })?.text).toContain('[IA : demander d’abord]')
+    expect((await ui.find({ type: 'Button', key: 'switch:bbbb-2222|org-b' } as never) as { text?: string })?.text).toBe('Passer ici')
+    expect(await ui.find({ type: 'Text', text: /Tab \/ flèches/ } as never)).toBeTruthy()
+    await ui.unmount()
+  })
+
+  test('auto: the system language (LANG), else English', async ($, on) => {
+    world(on, { env: { LANG: 'de_DE.UTF-8' } })
+    await $.session.start({ cwd: '/' } as never)
+    expect(await command($, 'auto')).toContain('Die KI darf von selbst wechseln')
+  })
+
+  test('auto with an unknown language: English', async ($, on) => {
+    world(on, { env: { LANG: 'ja_JP.UTF-8' } })
+    await $.session.start({ cwd: '/' } as never)
+    expect(await command($, 'auto')).toContain('The model may switch on its own')
   })
 })

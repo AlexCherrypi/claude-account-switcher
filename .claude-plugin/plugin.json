@@ -1,6 +1,6 @@
 {
   "name": "account-switcher",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Keeps every Claude account you sign in with in a file of its own (tokens, email, name, organization), switches the session to another one on the spot – writing the current account's tokens back first – and reads each account's 5-hour and 7-day limits without switching. The model can do it too, if you let it (on by default), to spread work over your accounts. Works with CTM.",
   "author": {
     "name": "AlexCherrypi"
@@ -24,6 +24,18 @@
       "title": "Always ask before the model switches to",
       "description": "Comma-separated emails, domains (@wemotion.io) or organization names. For these accounts the model must always ask you first; /account allow cannot lift it. Set it in managed settings to enforce it for an organization.",
       "default": ""
+    },
+    "language": {
+      "type": "string",
+      "title": "Language",
+      "description": "The language of /account, the settings pane and the dialogs. auto = Claude Code's language setting, else the system's (LANG), else English. What the model reads stays English.",
+      "default": "auto",
+      "options": [
+        "auto",
+        "en",
+        "de",
+        "fr"
+      ]
     },
     "autoSave": {
       "type": "boolean",

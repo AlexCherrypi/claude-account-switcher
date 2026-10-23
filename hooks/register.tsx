@@ -1,6 +1,8 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 import type { AccountRow } from '../types'
+import { langOf, msg } from './i18n'
+import type { Lang } from './i18n'
 
 // Account switcher
 //
@@ -113,6 +115,8 @@ let autoSave = true
 let configuredStoreDir = ''
 let configuredKeychain = ''
 let alwaysAsk: string[] = [] // emails, @domains or organization names, lower case
+let configuredLanguage = 'auto'
+let userLang: Lang = 'en' // what the person reads; the model reads English
 let settings: Settings | null = null
 let lastModelSwitchAt = Number.NEGATIVE_INFINITY
 let lastTried = new Map<string, number>() // accountUuid -> last usage fetch
@@ -163,12 +167,27 @@ async function now($: EngineInterface): Promise<number> {
   return (await safe(() => $.clock.now())) ?? Date.now()
 }
 
-function fmtSpan(from: number, to: number): string {
+function fmtSpan(from: number, to: number, lang: Lang = 'en'): string {
   const min = Math.max(0, Math.round((to - from) / MINUTE))
-  if (min < 60) return `${min} min`
+  if (min < 60) return msg(lang, 'min')(min)
   const h = Math.floor(min / 60)
-  if (h < 48) return `${h} h ${min % 60} min`
-  return `${Math.floor(h / 24)} d ${h % 24} h`
+  if (h < 48) return msg(lang, 'hmin')(h, min % 60)
+  return msg(lang, 'dh')(Math.floor(h / 24), h % 24)
+}
+
+// The person's language: the option, else Claude Code's language setting, else the
+// system's (LANG), else English.
+async function resolveLang($: EngineInterface): Promise<Lang> {
+  const chosen = langOf(configuredLanguage === 'auto' ? '' : configuredLanguage)
+  if (chosen) return chosen
+  const setting = await safe(() => $.settings.read({ key: 'language' }))
+  const fromSetting = langOf(typeof setting === 'string' ? setting : '')
+  if (fromSetting) return fromSetting
+  for (const v of [await safe(() => $.env.get('LC_ALL')), await safe(() => $.env.get('LC_MESSAGES')), await safe(() => $.env.get('LANG'))]) {
+    const l = langOf(v)
+    if (l) return l
+  }
+  return 'en'
 }
 
 function fmtPercent(n: number): string {
@@ -482,7 +501,7 @@ async function healRecord($: EngineInterface, live: Live, owner: Account): Promi
   config.oauthAccount = owner.data.oauthAccount
   await $.fs.write(live.configPath, `${JSON.stringify(config, null, 2)}\n`)
   live.oauthAccount = owner.data.oauthAccount
-  toast($, `Account: ~/.claude.json named another account than the login – set back to ${shortName(owner.data)}`)
+  toast($, msg(userLang, 'toastRecordFixed')(shortName(owner.data)))
 }
 
 // Writes the live login into its account's file: the tokens Claude Code holds now (it
@@ -559,16 +578,16 @@ function mustAsk(a: AccountFile): boolean {
 }
 
 // A label names one account: refused where another saved account carries it already.
-function labelClash(accounts: Account[], label: string | null, key: string): string | null {
+function labelClash(accounts: Account[], label: string | null, key: string, lang: Lang = 'en'): string | null {
   if (!label) return null
   const other = accounts.find(a => keyOfFile(a.data) !== key && a.data.label?.toLowerCase() === label.toLowerCase())
-  return other ? `the label "${label}" is taken by ${describe(other.data)} – pick another, or relabel that one first` : null
+  return other ? msg(lang, 'labelTaken')(label, describe(other.data)) : null
 }
 
 // "work", an email, a name, an organization, a uuid (or its start), or the number the list shows.
-function findAccount(accounts: Account[], query: string): Account | { error: string } {
+function findAccount(accounts: Account[], query: string, lang: Lang = 'en'): Account | { error: string } {
   const q = query.trim().toLowerCase()
-  if (!q) return { error: 'name the account: its label, email, name, number in the list, or uuid' }
+  if (!q) return { error: msg(lang, 'nameIt') }
   if (/^\d+$/.test(q)) {
     const a = accounts[Number(q) - 1]
     if (a) return a
@@ -584,8 +603,8 @@ function findAccount(accounts: Account[], query: string): Account | { error: str
   const loose = accounts.filter(a => fields(a.data).some(f => f.startsWith(q) || f.includes(q)))
   if (exact.length === 0 && loose.length === 1) return loose[0]!
   const hits = exact.length > 1 ? exact : loose
-  if (hits.length > 1) return { error: `"${query}" fits ${hits.length} accounts: ${hits.map(a => describe(a.data)).join('; ')} – be more precise` }
-  return { error: `no saved account fits "${query}"${accounts.length ? ` (saved: ${accounts.map(a => shortName(a.data)).join(', ')})` : ' – none is saved yet'}` }
+  if (hits.length > 1) return { error: msg(lang, 'fits')(query, hits.length, hits.map(a => describe(a.data)).join('; ')) }
+  return { error: msg(lang, 'noneFits')(query, accounts.length ? accounts.map(a => shortName(a.data)).join(', ') : null) }
 }
 
 // ---------------------------------------------------------------- Usage and tokens
@@ -732,18 +751,18 @@ function isFull(u: Usage | null, at: number): boolean {
   return (['five_hour', 'seven_day'] as const).some(k => (percentNow(limitOf(u, k), at) ?? 0) >= FULL_AT[k])
 }
 
-function fmtLimits(u: Usage | null, at: number): string {
-  if (!u) return 'limits unknown'
+function fmtLimits(u: Usage | null, at: number, lang: Lang = 'en'): string {
+  if (!u) return msg(lang, 'limitsUnknown')
   const parts: string[] = []
-  for (const [kind, name] of [['five_hour', '5-hour'], ['seven_day', '7-day']] as const) {
+  for (const [kind, name] of [['five_hour', msg(lang, 'fiveHour')], ['seven_day', msg(lang, 'sevenDay')]] as const) {
     const l = limitOf(u, kind)
     if (!l) continue
     const reset = l.resetsAt ? Date.parse(l.resetsAt) : null
-    if (reset !== null && reset <= at) parts.push(`${name} 0% (window reset since the reading)`)
-    else parts.push(`${name} ${fmtPercent(l.percent)}${reset !== null ? ` (resets in ${fmtSpan(at, reset)})` : ''}`)
+    if (reset !== null && reset <= at) parts.push(msg(lang, 'windowReset')(name))
+    else parts.push(msg(lang, 'limit')(name, fmtPercent(l.percent), reset !== null ? fmtSpan(at, reset, lang) : null))
   }
-  if (parts.length === 0) return 'no 5-hour / 7-day limits reported'
-  return `${parts.join(' · ')} · read ${at - u.at < MINUTE ? 'just now' : `${fmtSpan(u.at, at)} ago`}`
+  if (parts.length === 0) return msg(lang, 'noLimits')
+  return `${parts.join(' · ')} · ${at - u.at < MINUTE ? msg(lang, 'readJustNow') : msg(lang, 'readAgo')(fmtSpan(u.at, at, lang))}`
 }
 
 // The account with the most room: neither limit near full, the lowest 5-hour use first.
@@ -768,26 +787,13 @@ function levelOf(a: AccountFile): Level {
 
 // Sets what the model may do for one account; refuses `allow` on the alwaysAsk list.
 // Answers what changed, in a sentence, or the refusal.
-async function setLevel($: EngineInterface, account: Account, level: Level): Promise<{ text: string; refused?: true }> {
-  if (level === 'allow' && mustAsk(account.data)) {
-    return {
-      refused: true,
-      text:
-        `${describe(account.data)} is on the always-ask list (option alwaysAsk): the model must ask you before it ` +
-        'switches there, and that cannot be lifted here. Change the option (or, if your organization set it, ask them).',
-    }
-  }
+async function setLevel($: EngineInterface, account: Account, level: Level, lang: Lang = 'en'): Promise<{ text: string; refused?: true }> {
+  if (level === 'allow' && mustAsk(account.data)) return { refused: true, text: msg(lang, 'alwaysAskRefused')(describe(account.data)) }
   account.data.autoSwitch = level === 'allow'
   account.data.modelBlocked = level === 'block'
   await writeAccount($, account)
-  return {
-    text:
-      level === 'allow'
-        ? `The model may now switch to ${describe(account.data)} on its own.`
-        : level === 'ask'
-          ? `The model now asks you before it switches to ${describe(account.data)}.`
-          : `The model may no longer switch to ${describe(account.data)} at all, not even by asking. You still can (/account switch).`,
-  }
+  const key = level === 'allow' ? 'nowAllow' : level === 'ask' ? 'nowAsk' : 'nowBlock'
+  return { text: msg(lang, key)(describe(account.data)) }
 }
 
 // Enter on a row: on to the next level, past `allow` where asking is enforced.
@@ -796,10 +802,8 @@ function nextLevel(level: Level, enforced: boolean): Level {
   return order[(order.indexOf(level) + 1) % order.length] ?? 'ask'
 }
 
-const LEVEL_TEXT: Record<Level, string> = {
-  allow: 'switch freely',
-  ask: 'ask first',
-  block: 'never',
+function levelText(level: Level, lang: Lang): string {
+  return msg(lang, level === 'allow' ? 'levelAllow' : level === 'ask' ? 'levelAsk' : 'levelBlock')
 }
 
 const PANE = 'account-switcher'
@@ -820,39 +824,39 @@ async function refreshRows($: EngineInterface): Promise<void> {
     level: levelOf(a.data),
     enforced: mustAsk(a.data),
     active: keyOfFile(a.data) === activeKey,
-    limits: (a.data.lastUsage ? fmtLimits(a.data.lastUsage, at) : 'limits not read yet') + (a.data.lastUsage && isFull(a.data.lastUsage, at) ? ' · FULL' : ''),
+    limits:
+      (a.data.lastUsage ? fmtLimits(a.data.lastUsage, at, userLang) : msg(userLang, 'limitsNotRead')) +
+      (a.data.lastUsage && isFull(a.data.lastUsage, at) ? ` · ${msg(userLang, 'full')}` : ''),
   }))
   await update($, rows, () => list)
 }
 
 // Deletes an account's file; refused for the active one (autoSave would save it again).
-async function removeAccount($: EngineInterface, account: Account): Promise<string> {
+async function removeAccount($: EngineInterface, account: Account, lang: Lang = 'en'): Promise<string> {
   const live = await safe(() => readLive($))
-  if (live && keyOf(live.oauthAccount) === keyOfFile(account.data) && autoSave) {
-    return `${describe(account.data)} is the active account and would be saved again at once (autoSave). Switch away first.`
-  }
+  if (live && keyOf(live.oauthAccount) === keyOfFile(account.data) && autoSave) return msg(lang, 'removeActive')(describe(account.data))
   const argv = (await isWindows($)) ? ['cmd', '/c', 'del', '/f', '/q', account.path.replace(/\//g, '\\')] : ['rm', '-f', account.path]
   const r = await $.process.run(argv, { timeoutMs: 5_000 })
-  if (r.exitCode !== 0) return `Could not remove ${account.path}: ${scrub(r.stderr)}`
+  if (r.exitCode !== 0) return msg(lang, 'removeFailed')(account.path, scrub(r.stderr))
   void safe(() => refreshRows($))
-  return `Removed ${describe(account.data)} (its file is gone; its login elsewhere is untouched).`
+  return msg(lang, 'removed')(describe(account.data))
 }
 
 // Gives an account a new short name; refused where another carries it.
-async function renameAccount($: EngineInterface, account: Account, label: string): Promise<string> {
+async function renameAccount($: EngineInterface, account: Account, label: string, lang: Lang = 'en'): Promise<string> {
   const accounts = await listAccounts($)
   const name = label.trim() || null
-  const clash = labelClash(accounts, name, keyOfFile(account.data))
+  const clash = labelClash(accounts, name, keyOfFile(account.data), lang)
   if (clash) return clash
   account.data.label = name ?? autoLabel(accounts, { ...account.data, label: null })
   await writeAccount($, account)
   void safe(() => refreshRows($))
-  return `Renamed: ${describe(account.data)}.`
+  return msg(lang, 'renamed')(describe(account.data))
 }
 
 async function openPane($: EngineInterface): Promise<void> {
   await refreshRows($)
-  await $.ui.open({ id: PANE, title: 'Accounts', focus: true, closeOnEscape: true })
+  await $.ui.open({ id: PANE, title: msg(userLang, 'paneTitle'), focus: true, closeOnEscape: true })
 }
 
 // ---------------------------------------------------------------- Guarding the store
@@ -915,7 +919,11 @@ async function setModelMaySwitch($: EngineInterface, value: boolean | null): Pro
 
 // ---------------------------------------------------------------- What the tools answer
 
-async function overview($: EngineInterface, { refresh }: { refresh: boolean }): Promise<string> {
+// The list of accounts. `forModel`: in English, with what the model may do in its words;
+// else in the person's language, with what the model may do in theirs.
+async function overview($: EngineInterface, { refresh, forModel = false }: { refresh: boolean; forModel?: boolean }): Promise<string> {
+  const lang: Lang = forModel ? 'en' : userLang
+  const t = <K extends Parameters<typeof msg>[1]>(key: K) => msg(lang, key)
   let synced: Awaited<ReturnType<typeof syncLive>> | null = null
   let syncError: string | null = null
   try {
@@ -936,39 +944,42 @@ async function overview($: EngineInterface, { refresh }: { refresh: boolean }): 
   const lines: string[] = []
   const active = accounts.find(a => keyOfFile(a.data) === activeUuid)
   lines.push(
-    `Accounts: ${accounts.length} saved · active: ${
-      active ? describe(active.data) : activeUuid ? `${str(live?.oauthAccount?.emailAddress) ?? accountUuid(live?.oauthAccount ?? null)} (not saved – /account save)` : 'none (not signed in with a claude.ai account)'
-    }`,
+    t('header')(
+      accounts.length,
+      active
+        ? describe(active.data)
+        : activeUuid
+          ? t('activeUnsaved')(str(live?.oauthAccount?.emailAddress) ?? accountUuid(live?.oauthAccount ?? null) ?? '?')
+          : t('notSignedIn'),
+    ),
   )
   readings.forEach((r, i) => {
     const d = r.account.data
     // Every line starts with a glyph: Claude Code shifts lines that start with spaces.
     const mark = keyOfFile(d) === activeUuid ? '▶' : '○'
     const facts = [d.email, d.displayName, d.organizationName, d.subscriptionType].filter(Boolean).join(' · ')
-    const allow = d.modelBlocked
-      ? 'model may NOT switch here'
-      : mustAsk(d)
-        ? 'model asks first (enforced)'
-        : d.autoSwitch
-          ? 'model may switch here'
-          : 'model asks first'
+    const allow = t(d.modelBlocked ? 'listMayNot' : mustAsk(d) ? 'listAsksEnforced' : d.autoSwitch ? 'listMay' : 'listAsks')
     lines.push(`${mark} ${i + 1}. ${d.label ? `${d.label} – ` : ''}${facts || d.accountUuid} · ${allow}`)
-    let detail = `└ ${fmtLimits(r.usage, at)}`
-    if (r.usage && isFull(r.usage, at)) detail += ' · FULL'
-    if (d.needsLogin) detail += ' · NEEDS A NEW LOGIN (its refresh token was refused)'
-    else if (r.error && r.error !== 'not read yet') detail += ` · could not read anew: ${r.error}`
+    let detail = `└ ${fmtLimits(r.usage, at, lang)}`
+    if (r.usage && isFull(r.usage, at)) detail += ` · ${t('full')}`
+    if (d.needsLogin) detail += ` · ${t('needsLogin')}`
+    else if (r.error && r.error !== 'not read yet') detail += ` · ${t('couldNotReadAnew')(r.error)}`
     lines.push(detail)
   })
-  if (syncError) lines.push(`(Could not read the current login: ${syncError})`)
+  if (syncError) lines.push(t('couldNotReadLogin')(syncError))
   const best = bestOther(readings, activeUuid, at)
   const may = await modelMaySwitch($)
   lines.push(
     best
-      ? `Most room elsewhere: ${readings.indexOf(best) + 1}. ${shortName(best.account.data)} – ${fmtLimits(best.usage, at)}`
+      ? t('mostRoom')(readings.indexOf(best) + 1, shortName(best.account.data), fmtLimits(best.usage, at, lang))
       : accounts.length > 1
-        ? 'No other account with room known.'
-        : 'Only one account saved: switching needs another (sign in with it via /login – it is saved on its own – then come back).',
+        ? t('noRoom')
+        : t('onlyOne'),
   )
+  if (!forModel) {
+    lines.push(may ? t('userModelMay')(cooldownMs / MINUTE) : t('userModelMayNot'))
+    return lines.join('\n')
+  }
   lines.push(
     may
       ? `You may switch on your own to accounts marked "model may switch here" (${T_SWITCH}${cooldownMs > 0 ? `, at most every ${cooldownMs / MINUTE} min` : ''}); ` +
@@ -980,71 +991,67 @@ async function overview($: EngineInterface, { refresh }: { refresh: boolean }): 
 }
 
 // Where this machine keeps what: for /account where, to check a new system by hand.
-async function whereReport($: EngineInterface): Promise<string> {
+async function whereReport($: EngineInterface, lang: Lang = 'en'): Promise<string> {
+  const t = <K extends Parameters<typeof msg>[1]>(key: K) => msg(lang, key)
   const lines: string[] = []
   const windows = await isWindows($)
   const mac = await isMac($)
-  lines.push(`System: ${windows ? 'Windows' : mac ? 'macOS' : 'Linux / other Unix'}`)
-  lines.push(`Home: ${(await home($)) ?? '(none – neither HOME nor USERPROFILE is set)'}`)
-  lines.push(`Claude config dir: ${(await configDir($)) ?? '?'}`)
-  if (mac) lines.push(`Keychain item looked for: "${await keychainService($)}" (account "${await keychainUser($)}")`)
-  lines.push(`Credentials file${mac ? ' (used where the keychain has no item)' : ''}: ${(await credentialsFile($)) ?? '?'}`)
-  lines.push(`Account record: ${(await globalConfigPath($)) ?? '?'} (oauthAccount – CTM reads it too)`)
-  lines.push(`Account store: ${(await storeDir($)) ?? '?'}`)
+  lines.push(t('whereSystem')(windows ? 'Windows' : mac ? 'macOS' : t('whereOther')))
+  lines.push(t('whereHome')(await home($)))
+  lines.push(t('whereConfig')((await configDir($)) ?? '?'))
+  if (mac) lines.push(t('whereKeychain')(await keychainService($), await keychainUser($)))
+  lines.push(t('whereCredentials')((await credentialsFile($)) ?? '?', mac))
+  lines.push(t('whereRecord')((await globalConfigPath($)) ?? '?'))
+  lines.push(t('whereStore')((await storeDir($)) ?? '?'))
   try {
     const live = await readLive($)
     lines.push(
-      `Login found in: ${live.backend.kind === 'keychain' ? `the macOS keychain ("${live.backend.service}")` : live.backend.path}` +
-        (live.unreadable
-          ? ' – but it is BROKEN (no readable JSON, cut short by a failed write): /account switch <a saved account> or /login repairs it'
-          : live.tokens
-            ? ''
-            : ' – but it holds no claude.ai tokens (an API key, a cloud provider, or not signed in)'),
+      t('whereLoginIn')(live.backend.kind === 'keychain' ? t('whereKeychainAt')(live.backend.service) : live.backend.path) +
+        (live.unreadable ? t('whereBroken') : live.tokens ? '' : t('whereNoTokens')),
     )
     const uuid = keyOf(live.oauthAccount)
     lines.push(
-      `Account record names: ${uuid ? `${str(live.oauthAccount?.emailAddress) ?? '?'} (account ${accountUuid(live.oauthAccount)}, organization ${str(live.oauthAccount?.organizationUuid) ?? '?'})` : 'no account'}`,
+      uuid
+        ? t('whereRecordNames')(str(live.oauthAccount?.emailAddress) ?? '?', accountUuid(live.oauthAccount) ?? '?', str(live.oauthAccount?.organizationUuid) ?? '?')
+        : t('whereRecordNone'),
     )
     if (live.tokens && uuid) {
       const accounts = await listAccounts($)
       const saved = accounts.find(a => keyOfFile(a.data) === uuid)
       lines.push(
-        saved
-          ? `Saved in the store: yes – ${describe(saved.data)}, last written ${saved.data.updatedAt} (${saved.path})`
-          : `Saved in the store: not yet – ${autoSave ? 'it is saved with the next /account or within 5 min (autoSave)' : 'autoSave is off: /account save'}`,
+        saved ? t('whereSavedYes')(describe(saved.data), saved.data.updatedAt, saved.path) : t('whereSavedNot')(autoSave),
       )
-      lines.push(`Accounts in the store: ${accounts.length}${accounts.length ? ` (${accounts.map(a => shortName(a.data)).join(', ')})` : ''}`)
+      lines.push(t('whereInStore')(accounts.length, accounts.map(a => shortName(a.data)).join(', ')))
       const owner = await ownerOf($, live.tokens, uuid, accounts)
       const ownerFile = accounts.find(a => keyOfFile(a.data) === owner)
       lines.push(
-        owner === uuid
-          ? 'Tokens and record agree.'
-          : `Tokens belong to ${ownerFile ? describe(ownerFile.data) : `another account or organization (${owner})`} – the record names another (the next sync sets it right where that one is saved).`,
+        owner === uuid ? t('whereAgree') : t('whereOwner')(ownerFile ? describe(ownerFile.data) : t('whereOtherOwner')(owner ?? '?')),
       )
     }
   } catch (err) {
-    lines.push(`Could not read the login: ${errorText(err)}`)
+    lines.push(t('whereCannotRead')(errorText(err)))
   }
   return lines.join('\n')
 }
 
-type SwitchBy = { by: 'model' | 'person'; reason?: string }
+// lang: what the answer and its errors are written in – the model's English, or the person's.
+type SwitchBy = { by: 'model' | 'person'; reason?: string; lang?: Lang }
 
 async function switchTo($: EngineInterface, query: string, how: SwitchBy): Promise<string> {
+  const lang: Lang = how.lang ?? 'en'
+  const t = <K extends Parameters<typeof msg>[1]>(key: K) => msg(lang, key)
   return serial(async () => {
     const { account: current, live } = await syncLive($)
     const fromUuid = keyOf(live.oauthAccount)
     const accounts = await listAccounts($)
     await ensureLabels($, accounts)
-    const found = findAccount(accounts, query)
+    const found = findAccount(accounts, query, lang)
     if ('error' in found) throw new Error(found.error)
     const target = found
-    if (keyOfFile(target.data) === fromUuid) return `Already on ${describe(target.data)} – nothing to switch.`
+    if (keyOfFile(target.data) === fromUuid) return t('already')(describe(target.data))
     // A login with no tokens in it (signed out, or broken) has nothing to lose: switching repairs it.
     if (fromUuid && !current && live.tokens) {
-      throw new Error(
-        `the account signed in now (${str(live.oauthAccount?.emailAddress) ?? fromUuid}) is not saved, and autoSave is off – its login would be lost. Save it first (/account save, or ${T_SAVE}).`,
-      )
+      throw new Error(t('notSavedNoAuto')(str(live.oauthAccount?.emailAddress) ?? fromUuid, T_SAVE))
     }
     // A target whose login no longer works would leave the session signed out: renew and
     // read it first (this also renews a token that ran out, and saves the new pair).
@@ -1055,10 +1062,10 @@ async function switchTo($: EngineInterface, query: string, how: SwitchBy): Promi
       await safe(() => writeAccount($, target))
       reading = { account: target, usage, error: null, fresh: true }
     } catch (err) {
-      if (err instanceof AuthError) throw new Error(`${describe(target.data)} cannot be signed in: ${err.message}`)
+      if (err instanceof AuthError) throw new Error(t('cannotSignIn')(describe(target.data), err.message))
       reading = { account: target, usage: target.data.lastUsage ?? null, error: errorText(err), fresh: false }
       if (expired(target.data.claudeAiOauth, await now($))) {
-        throw new Error(`${describe(target.data)}: its token ran out and could not be renewed (${errorText(err)}) – try again later`)
+        throw new Error(t('tokenRanOut')(describe(target.data), errorText(err)))
       }
     }
     // The login: the target's tokens, everything else in the document as it was.
@@ -1069,10 +1076,7 @@ async function switchTo($: EngineInterface, query: string, how: SwitchBy): Promi
     } catch (err) {
       // A write that failed half-way may have left a broken login: put the old one back.
       const restored = previousDoc ? await safe(() => writeBackend($, live.backend, previousDoc).then(() => true)) : false
-      throw new Error(
-        `could not write the login (${errorText(err)}) – ` +
-          (restored ? 'the old login is back in place, nothing changed' : 'and the old login could not be put back: sign in again with /login'),
-      )
+      throw new Error(t('writeFailed')(errorText(err), Boolean(restored)))
     }
     try {
       const config = await readGlobalConfig($, live.configPath)
@@ -1081,26 +1085,36 @@ async function switchTo($: EngineInterface, query: string, how: SwitchBy): Promi
     } catch (err) {
       // Put the old login back, or tokens and account record would disagree.
       if (previousDoc) await safe(() => writeBackend($, live.backend, previousDoc))
-      throw new Error(`could not update ${live.configPath} (${errorText(err)}) – the old login is back in place`)
+      throw new Error(t('configFailed')(live.configPath, errorText(err)))
     }
     const after = await readLive($)
     if (keyOf(after.oauthAccount) !== keyOfFile(target.data) || after.tokens?.accessToken !== target.data.claudeAiOauth.accessToken) {
-      throw new Error('the switch did not hold – something else wrote the login at the same time; check with /account')
+      throw new Error(t('didNotHold'))
     }
     const at = await now($)
     if (how.by === 'model') lastModelSwitchAt = at
     // A Claude Code session that still held the old record may write it back soon after:
     // look again a few times (syncLive puts the right record back).
     for (const ms of [10_000, 30_000, 60_000, 120_000]) $.clock.after(ms, () => void safe(() => serial(() => syncLive($))))
-    const from = current ? describe(current.data) : 'no saved account'
-    toast($, `Account: switched to ${shortName(target.data)}${how.by === 'model' ? ' (by the model)' : ''}`)
+    const from = current ? describe(current.data) : t('noSavedAccount')
+    toast($, msg(userLang, 'toastSwitched')(shortName(target.data), how.by === 'model'))
     void safe(() => refreshRows($)) // the settings pane, where it is open
     return [
-      `Switched from ${from} to ${describe(target.data)}.${how.reason ? ` Reason: ${how.reason}` : ''}`,
-      `Its limits: ${fmtLimits(reading?.usage ?? null, at)}${reading?.error ? ` (could not read anew: ${reading.error})` : ''}.`,
-      'Claude Code uses the new login from its next request on. Every Claude Code session on this machine that shares this config dir now runs on it too.',
+      t('switched')(from, describe(target.data), how.reason ?? null),
+      t('itsLimits')(fmtLimits(reading?.usage ?? null, at, lang), reading?.error ?? null),
+      t('sessionsFollow'),
     ].join('\n')
   })
+}
+
+// What the model is told after the person switched in their language: the active account
+// and its limits, in English.
+async function switchSummary($: EngineInterface): Promise<string> {
+  const live = await safe(() => readLive($))
+  const key = keyOf(live?.oauthAccount ?? null)
+  const account = (await listAccounts($)).find(a => keyOfFile(a.data) === key)
+  if (!account) return 'The active account is not in the store.'
+  return `Now active: ${describe(account.data)}. Its limits: ${fmtLimits(account.data.lastUsage ?? null, await now($))}.`
 }
 
 const BRIEFING = [
@@ -1121,6 +1135,8 @@ export const register: Register = (on, options) => {
   autoSave = options.autoSave !== false
   configuredStoreDir = String(options.storeDir ?? '').trim()
   configuredKeychain = String(options.keychainService ?? '').trim()
+  configuredLanguage = String(options.language ?? 'auto').trim().toLowerCase() || 'auto'
+  userLang = 'en'
   alwaysAsk = String(options.alwaysAsk ?? '')
     .split(/[,;\n]/)
     .map(x => x.trim().toLowerCase())
@@ -1184,6 +1200,7 @@ export const register: Register = (on, options) => {
       }),
     )
     await ensureSettings($)
+    userLang = await resolveLang($)
     await safe(() => serial(() => syncLive($)))
     syncTimer?.cancel()
     // Claude Code renews the active account's tokens now and then: keep its file current,
@@ -1222,7 +1239,7 @@ export const register: Register = (on, options) => {
 
   on('tool.call', { tool: T_ACCOUNTS }, async ($, e) => {
     const refresh = (e as unknown as { refresh?: unknown }).refresh === true
-    return { result: await overview($, { refresh }) }
+    return { result: await overview($, { refresh, forModel: true }) }
   }).catch(($, e, next) => (next.called ? next(e) : { deny: 'Account switcher: could not read the accounts.' }))
 
   on('tool.call', { tool: T_SWITCH }, async ($, e) => {
@@ -1260,20 +1277,20 @@ export const register: Register = (on, options) => {
       // model cannot answer it, and no permission mode or classifier settles it.
       const live = await safe(() => readLive($))
       if (live && keyOf(live.oauthAccount) === keyOfFile(target.data)) return { result: `Already on ${describe(target.data)} – nothing to switch.` }
-      const question = `Switch the Claude account to ${describe(target.data)}? Reason given: ${reason}`
+      const u = <K extends Parameters<typeof msg>[1]>(key: K) => msg(userLang, key)
       let answer: string | undefined
       try {
-        answer = await $.ui.ask(question, {
-          header: 'Account',
+        answer = await $.ui.ask(u('askQuestion')(describe(target.data), reason), {
+          header: u('askHeader'),
           options: [
-            { label: 'Switch', description: 'Switch now; every Claude Code session on this machine follows.' },
-            { label: 'Don’t switch', description: 'Stay on the current account.' },
+            { label: u('askSwitch'), description: u('askSwitchHint') },
+            { label: u('askStay'), description: u('askStayHint') },
           ],
         } as never)
       } catch {
         answer = undefined
       }
-      if (answer !== 'Switch') {
+      if (answer !== u('askSwitch')) {
         return {
           deny:
             `Account switcher: the user did not confirm the switch to ${describe(target.data)}${answer ? ` (answer: ${answer})` : ''}. ` +
@@ -1306,13 +1323,14 @@ export const register: Register = (on, options) => {
     // Mobile draws no text fields: renaming is /account label there.
     const Input = e.surface === 'mobile' ? null : $.ui.resolve(e).Input
     const list = await read($, rows)
+    const u = <K extends Parameters<typeof msg>[1]>(key: K) => msg(userLang, key)
     const pending = await read($, pendingRemove)
     const find = async (key: string) => (await listAccounts($)).find(a => keyOfFile(a.data) === key)
-    const say = (text: string) => toast($, `Account: ${text}`)
+    const say = (text: string) => toast($, `${u('askHeader')}: ${text}`)
     const change = (row: AccountRow) => async () => {
       const account = await find(row.key)
       if (account) {
-        const r = await setLevel($, account, nextLevel(levelOf(account.data), mustAsk(account.data)))
+        const r = await setLevel($, account, nextLevel(levelOf(account.data), mustAsk(account.data)), userLang)
         if (r.refused) say(r.text)
       }
       await refreshRows($)
@@ -1321,7 +1339,7 @@ export const register: Register = (on, options) => {
       await update($, pendingRemove, () => '')
       try {
         const text = await switchTo($, row.key, { by: 'person' })
-        say(`switched to ${row.name}`)
+        say(u('paneSwitched')(row.name))
         // The model reads it with its next turn, as it does after /account switch.
         await safe(() => $.session.append({ message: { type: 'user', content: [{ type: 'text', text: `[The user switched the Claude account in the account settings pane.]\n${text}` }] } } as never))
       } catch (err) {
@@ -1333,60 +1351,57 @@ export const register: Register = (on, options) => {
       if (pending !== row.key) return update($, pendingRemove, () => row.key)
       await update($, pendingRemove, () => '')
       const account = await find(row.key)
-      say(account ? await removeAccount($, account) : 'already gone')
+      say(account ? await removeAccount($, account, userLang) : u('paneGone'))
       await refreshRows($)
     }
     const rename = (row: AccountRow) => async (value: string) => {
       const account = await find(row.key)
-      say(account ? await renameAccount($, account, value) : 'already gone')
+      say(account ? await renameAccount($, account, value, userLang) : u('paneGone'))
     }
     const refresh = async () => {
-      say('reading every account’s limits …')
+      toast($, u('paneReading'))
       await safe(() => overview($, { refresh: true }))
       await refreshRows($)
-      say('limits read')
+      toast($, u('paneRead'))
     }
     return (
       <Box flexDirection="column">
-        <Text bold>Accounts</Text>
-        <Text dimColor>Tab / arrows: move · Enter: press · Esc: close</Text>
+        <Text bold>{u('paneTitle')}</Text>
+        <Text dimColor>{u('paneHelp')}</Text>
         <Box flexDirection="row" marginTop={1}>
           <Button key="refresh" onPress={refresh}>
-            Read limits anew
+            {u('paneReadAnew')}
           </Button>
         </Box>
-        {list.length === 0 && <Text dimColor>No account saved yet – sign in with /login, it is saved on its own.</Text>}
+        {list.length === 0 && <Text dimColor>{u('paneNone')}</Text>}
         {list.map((row, i) => (
           <Box key={`row-${row.key}`} flexDirection="column" marginTop={1}>
             <Button key={row.key} plain autoFocus={i === 0 ? true : undefined} onPress={change(row)}>
               {row.active ? '▶ ' : '○ '}
               {row.name} <Text dimColor>{row.who}</Text>
               {'  '}
-              <Text bold>
-                [model: {LEVEL_TEXT[row.level]}
-                {row.enforced && row.level === 'ask' ? ', enforced' : ''}]
-              </Text>
+              <Text bold>{u('paneModel')(levelText(row.level, userLang), row.enforced && row.level === 'ask')}</Text>
             </Button>
             <Text dimColor>└ {row.limits}</Text>
             <Box flexDirection="row">
               {row.active ? (
-                <Text dimColor>active </Text>
+                <Text dimColor>{u('paneActive')} </Text>
               ) : (
                 <Button key={`switch:${row.key}`} onPress={switchHere(row)}>
-                  Switch here
+                  {u('paneSwitchHere')}
                 </Button>
               )}
               {!row.active && <Text> </Text>}
               {!row.active && (
                 <Button key={`remove:${row.key}`} onPress={remove(row)} variant={pending === row.key ? 'primary' : undefined}>
-                  {pending === row.key ? 'Really remove? Press again' : 'Remove'}
+                  {pending === row.key ? u('paneReallyRemove') : u('paneRemove')}
                 </Button>
               )}
             </Box>
-            {Input && <Input key={`label:${row.key}`} label="Name" value={row.name} submitLabel="Rename" onSubmit={rename(row)} />}
+            {Input && <Input key={`label:${row.key}`} label={u('paneName')} value={row.name} submitLabel={u('paneRename')} onSubmit={rename(row)} />}
           </Box>
         ))}
-        <Text dimColor>model: switch freely = at once · ask first = a dialog asks you · never = only you can switch there</Text>
+        <Text dimColor>{u('paneLegend')}</Text>
       </Box>
     )
   })
@@ -1414,7 +1429,9 @@ export const register: Register = (on, options) => {
     const args = e.args.trim()
     const [verb = 'list', ...rest] = args.split(/\s+/).filter(Boolean)
     const tail = rest.join(' ')
-    const usage = 'Usage: /account [list|usage|settings|where] · /account allow|ask|block <name> · /account save [label] · /account switch <name> · /account label <name> <label> · /account remove <name> · /account auto on|off|default'
+    const lang = userLang
+    const t = <K extends Parameters<typeof msg>[1]>(key: K) => msg(lang, key)
+    const usage = t('usage')
     try {
       switch (verb.toLowerCase()) {
         case 'list':
@@ -1426,69 +1443,71 @@ export const register: Register = (on, options) => {
           return { text: await overview($, { refresh: true }) }
         case 'save': {
           const r = await serial(() => syncLive($, { create: true, ...(tail ? { label: tail } : {}) }))
-          if (!r.account) return { text: 'Not signed in with a claude.ai account – nothing to save.' }
-          return { text: `${r.created ? 'Saved' : 'Updated'} ${describe(r.account.data)} (${r.account.path}).` }
+          if (!r.account) return { text: t('nothingToSave') }
+          return { text: t(r.created ? 'saved' : 'updated')(describe(r.account.data), r.account.path) }
         }
         case 'switch':
         case 'use': {
           if (!tail) return { text: usage }
-          const text = await switchTo($, tail, { by: 'person' })
-          return { text, context: [`The user switched the Claude account with /account.\n${text}`] }
+          const text = await switchTo($, tail, { by: 'person', lang })
+          const forModel = lang === 'en' ? text : await switchSummary($)
+          return { text, context: [`The user switched the Claude account with /account.\n${forModel}`] }
         }
         case 'label':
         case 'name': {
           const [who = '', ...labelParts] = rest
           const accounts = await listAccounts($)
-          const found = findAccount(accounts, who)
+          const found = findAccount(accounts, who, lang)
           if ('error' in found) return { text: found.error }
           const label = labelParts.join(' ').trim() || null
-          const clash = labelClash(accounts, label, keyOfFile(found.data))
+          const clash = labelClash(accounts, label, keyOfFile(found.data), lang)
           if (clash) return { text: clash }
           found.data.label = label
-          void safe(() => refreshRows($))
           await writeAccount($, found)
-          return { text: `${found.data.label ? 'Labelled' : 'Label removed:'} ${describe(found.data)}.` }
+          void safe(() => refreshRows($))
+          return { text: t(found.data.label ? 'labelled' : 'labelRemoved')(describe(found.data)) }
         }
         case 'remove':
         case 'rm':
         case 'forget': {
           const accounts = await listAccounts($)
-          const found = findAccount(accounts, tail)
+          const found = findAccount(accounts, tail, lang)
           if ('error' in found) return { text: found.error }
-          return { text: await removeAccount($, found) }
+          return { text: await removeAccount($, found, lang) }
         }
         case 'allow':
         case 'ask':
         case 'block': {
           const accounts = await listAccounts($)
           await ensureLabels($, accounts)
-          const found = findAccount(accounts, tail)
+          const found = findAccount(accounts, tail, lang)
           if ('error' in found) return { text: found.error }
-          const r = await setLevel($, found, verb.toLowerCase() as Level)
+          const level = verb.toLowerCase() as Level
+          const r = await setLevel($, found, level, lang)
           if (r.refused) return { text: r.text }
-          const text = r.text
-          return { text, context: [`The user changed this with /account ${verb}: ${text}`] }
+          const forModel = msg('en', level === 'allow' ? 'nowAllow' : level === 'ask' ? 'nowAsk' : 'nowBlock')(describe(found.data))
+          return { text: r.text, context: [`The user changed this with /account ${verb}: ${forModel}`] }
         }
         case 'settings':
         case 'ui':
           await openPane($)
-          return { text: 'Account settings opened: Tab or arrows move between accounts, Enter changes what the model may do, Esc closes.' }
+          return { text: t('settingsOpened') }
         case 'where':
         case 'doctor':
-          return { text: await whereReport($) }
+          return { text: await whereReport($, lang) }
         case 'auto': {
           const v = tail.toLowerCase()
-          if (!['on', 'off', 'default'].includes(v)) return { text: `The model may switch on its own: ${(await modelMaySwitch($)) ? 'yes' : 'no'}. ${usage}` }
+          if (!['on', 'off', 'default'].includes(v)) return { text: `${t('autoState')(await modelMaySwitch($))} ${usage}` }
           await setModelMaySwitch($, v === 'default' ? null : v === 'on')
           const may = await modelMaySwitch($)
-          const text = `The model may switch accounts on its own: ${may ? 'yes' : 'no'}.`
+          const text = t('autoChanged')(may)
           return { text, context: [`The user changed this with /account auto: ${may ? 'you may now switch accounts on your own when it helps' : 'you may NOT switch accounts on your own any more – suggest switches to the user instead'}.`] }
         }
         default:
           return { text: usage }
       }
     } catch (err) {
-      return { text: `Account switcher: ${errorText(err)}` }
+      return { text: t('failed')(errorText(err)) }
     }
   })
 }
