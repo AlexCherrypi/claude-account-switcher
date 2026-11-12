@@ -146,7 +146,7 @@ function world(on: On, opts: WorldOpts = {}) {
     seen.toasts.push(String((e as unknown as { text: string }).text))
     return { value: undefined } as never
   })
-  // The engine's AskUserQuestion dialog, as $.ui.ask raises it.
+  // The engine's AskUserQuestion dialog: the plugin must never raise it any more.
   on('tool.call', { tool: 'AskUserQuestion' }, (_$, e) => {
     const q = (e as unknown as { questions: { question: string }[] }).questions[0]!.question
     seen.questions.push(q)
@@ -553,63 +553,48 @@ describe('names', () => {
   })
 })
 
-describe('the allow list', () => {
-  test('to an account off the list the model switches only once the user confirms', async ($, on) => {
+describe('what the model may do', () => {
+  test('an account that used to be "ask first" is now switched to freely, with no dialog', async ($, on) => {
     const { seen } = world(on)
-    saveB(seen, tokens('b1'), false)
+    saveB(seen, tokens('b1'), false) // autoSwitch: false – "ask first" before 0.11
     await $.session.start({ cwd: '/' } as never)
-    expect(String((await call($, 'accounts')).result)).toContain('private – alice@home.example · Alice · pro · model asks first')
-
-    seen.answer = 'Don’t switch'
-    const no = await call($, 'switch', { account: 'private', reason: '5-hour limit at 91%' })
-    expect(no.deny).toMatch(/the user did not confirm the switch to private/)
-    expect(seen.questions[0]).toBe('Switch the Claude account to private (alice@home.example · Alice)? Reason given: 5-hour limit at 91%')
-    expect(file(seen, CREDS).claudeAiOauth.accessToken).toBe('at-a1')
-
-    seen.answer = null // dismissed
-    expect((await call($, 'switch', { account: 'private', reason: 'room' })).deny).toMatch(/did not confirm/)
-
-    seen.answer = 'Switch'
-    const yes = await call($, 'switch', { account: 'private', reason: 'room' })
-    expect(yes.deny).toBeUndefined()
+    expect(String((await call($, 'accounts')).result)).toContain('private – alice@home.example · Alice · pro · model may switch here')
+    const r = await call($, 'switch', { account: 'private', reason: '5-hour limit at 91%' })
+    expect(r.deny).toBeUndefined()
+    expect(seen.questions).toEqual([])
     expect(file(seen, CREDS).claudeAiOauth.accessToken).toBe('at-b1')
   })
 
-  test('/account allow puts an account on the list; no dialog then', async ($, on) => {
+  test('/account ask is gone', async ($, on) => {
     const { seen } = world(on)
-    saveB(seen, tokens('b1'), false)
+    saveB(seen)
     await $.session.start({ cwd: '/' } as never)
-    expect(await command($, 'allow private')).toContain('may now switch to private')
-    expect(file(seen, `${STORE}/bbbb-2222.json`).autoSwitch).toBe(true)
-    expect((await call($, 'switch', { account: 'private', reason: 'room' })).deny).toBeUndefined()
-    expect(seen.questions).toEqual([])
-    expect(await command($, 'ask private')).toContain('now asks you before it switches to private')
-    expect(file(seen, `${STORE}/bbbb-2222.json`).autoSwitch).toBe(false)
+    expect(await command($, 'ask private')).toContain('Usage:')
+    expect(file(seen, `${STORE}/bbbb-2222.json`).modelBlocked).toBeUndefined()
   })
 
-  test('a new login is not on the list until the user puts it there', async ($, on) => {
+  test('a new login is allowed until the user blocks it', async ($, on) => {
     const { seen } = world(on)
     await $.session.start({ cwd: '/' } as never)
-    expect(file(seen, `${STORE}/aaaa-1111_org-a.json`).autoSwitch).toBeUndefined()
+    expect(String((await call($, 'accounts')).result)).toMatch(/alice – alice@work\.example .* · model may switch here/)
   })
 })
 
 describe('excluded accounts', () => {
-  test('the model may not switch to a blocked account, not even by asking; the user still can', async ($, on) => {
+  test('the model may not switch to a blocked account; the user still can', async ($, on) => {
     const { seen } = world(on)
     saveB(seen)
     await $.session.start({ cwd: '/' } as never)
     expect(await command($, 'block private')).toContain('may no longer switch to private')
     const b = file(seen, `${STORE}/bbbb-2222.json`)
     expect(b.modelBlocked).toBe(true)
-    expect(b.autoSwitch).toBe(false)
+    expect(b.autoSwitch).toBeUndefined() // the old field is dropped on write
 
     const list = String((await call($, 'accounts')).result)
     expect(list).toContain('private – alice@home.example · Alice · pro · model may NOT switch here')
     // It has the most room, but it is not offered to the model.
     expect(list).not.toContain('Most room elsewhere')
 
-    seen.answer = 'Switch'
     const r = await call($, 'switch', { account: 'private', reason: 'room' })
     expect(r.deny).toMatch(/the user has excluded private .* from switches by you.*\/account switch private/)
     expect(seen.questions).toEqual([])
@@ -619,42 +604,35 @@ describe('excluded accounts', () => {
     expect(file(seen, CREDS).claudeAiOauth.accessToken).toBe('at-b1')
   })
 
-  test('/account ask or allow lifts the block', async ($, on) => {
+  test('/account allow lifts the block', async ($, on) => {
     const { seen } = world(on)
     saveB(seen)
     await command($, 'block private')
-    await command($, 'allow private')
-    const b = file(seen, `${STORE}/bbbb-2222.json`)
-    expect(b.modelBlocked).toBe(false)
-    expect(b.autoSwitch).toBe(true)
+    expect(await command($, 'allow private')).toContain('may now switch to private')
+    expect(file(seen, `${STORE}/bbbb-2222.json`).modelBlocked).toBe(false)
     expect((await call($, 'switch', { account: 'private', reason: 'room' })).deny).toBeUndefined()
   })
 })
 
-describe('alwaysAsk: asking enforced', () => {
-  test('an account on the list is asked for even when allowed, and /account allow is refused', { options: { alwaysAsk: '@home.example' } }, async ($, on) => {
+describe('neverSwitch: the block enforced', () => {
+  test('an account on the list is refused to the model, and /account allow is refused', { options: { neverSwitch: '@home.example' } }, async ($, on) => {
     const { seen } = world(on)
-    saveB(seen) // autoSwitch: true in its file
+    saveB(seen)
     await $.session.start({ cwd: '/' } as never)
-    expect(String((await call($, 'accounts')).result)).toContain('model asks first (enforced)')
-    expect(await command($, 'allow private')).toContain('is on the always-ask list (option alwaysAsk)')
-
-    seen.answer = 'Don’t switch'
-    expect((await call($, 'switch', { account: 'private', reason: 'room' })).deny).toMatch(/did not confirm/)
-    expect(seen.questions.length).toBe(1)
-    seen.answer = 'Switch'
-    expect((await call($, 'switch', { account: 'private', reason: 'room' })).deny).toBeUndefined()
-    // The user's own switch never asks.
-    expect(await command($, 'switch alice')).toContain('Switched')
-    expect(seen.questions.length).toBe(2)
+    expect(String((await call($, 'accounts')).result)).toContain('model may NOT switch here (enforced)')
+    expect(await command($, 'allow private')).toContain('is on the never-switch list (option neverSwitch)')
+    expect((await call($, 'switch', { account: 'private', reason: 'room' })).deny).toMatch(/has excluded private/)
+    expect(seen.questions).toEqual([])
+    // The user's own switch is never held back.
+    expect(await command($, 'switch private')).toContain('Switched')
   })
 
-  test('organization names and emails match too; others are untouched', { options: { alwaysAsk: 'Work Inc, someone@else.example' } }, async ($, on) => {
+  test('the old alwaysAsk option counts as neverSwitch; organization names and emails match too', { options: { alwaysAsk: 'Work Inc, someone@else.example' } }, async ($, on) => {
     const { seen } = world(on)
     saveB(seen)
     await $.session.start({ cwd: '/' } as never)
     const list = String((await call($, 'accounts')).result)
-    expect(list).toMatch(/alice – alice@work\.example .* · model asks first \(enforced\)/)
+    expect(list).toMatch(/alice – alice@work\.example .* · model may NOT switch here \(enforced\)/)
     expect(list).toMatch(/private – alice@home\.example .* · model may switch here/)
   })
 })
@@ -684,7 +662,7 @@ describe('the settings pane', () => {
     props: { title: 'Accounts', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
   } as const
 
-  test('Enter on an account steps through switch freely, ask first, never – on every surface', { options: { alwaysAsk: 'Work Inc' } }, async ($, on) => {
+  test('Enter on an account toggles switch freely and never – on every surface', { options: { neverSwitch: 'Work Inc' } }, async ($, on) => {
     const { seen } = world(on)
     saveB(seen, tokens('b1'), false)
     await $.session.start({ cwd: '/' } as never)
@@ -694,24 +672,21 @@ describe('the settings pane', () => {
     for (const surface of ['terminal', 'desktop'] as const) {
       const ui = await $.ui.mount({ ...PANE, surface } as never)
       const row = async (key: string) => (await ui.find({ type: 'Button', key } as never)) as { text?: string } | undefined
-      expect((await row('bbbb-2222|org-b'))?.text).toMatch(/private .*alice@home\.example.*\[model: ask first\]/)
-      expect((await row('aaaa-1111|org-a'))?.text).toMatch(/▶ alice .*\[model: ask first, enforced\]/)
+      expect((await row('bbbb-2222|org-b'))?.text).toMatch(/private .*alice@home\.example.*\[model: switch freely\]/)
+      expect((await row('aaaa-1111|org-a'))?.text).toMatch(/▶ alice .*\[model: never, enforced\]/)
       expect((await ui.find({ type: 'Text', text: /5-hour 91%/ } as never))).toBeTruthy()
 
       await ui.press({ key: 'bbbb-2222|org-b' } as never)
       expect(file(seen, `${STORE}/bbbb-2222.json`).modelBlocked).toBe(true)
       expect((await row('bbbb-2222|org-b'))?.text).toMatch(/\[model: never\]/)
       await ui.press({ key: 'bbbb-2222|org-b' } as never)
-      expect(file(seen, `${STORE}/bbbb-2222.json`).autoSwitch).toBe(true)
+      expect(file(seen, `${STORE}/bbbb-2222.json`).modelBlocked).toBe(false)
       expect((await row('bbbb-2222|org-b'))?.text).toMatch(/\[model: switch freely\]/)
-      await ui.press({ key: 'bbbb-2222|org-b' } as never)
-      expect((await row('bbbb-2222|org-b'))?.text).toMatch(/\[model: ask first\]/)
 
-      // Asking is enforced for alice: the steps skip "switch freely".
+      // The block is enforced for alice: Enter cannot lift it.
       await ui.press({ key: 'aaaa-1111|org-a' } as never)
-      expect((await row('aaaa-1111|org-a'))?.text).toMatch(/\[model: never\]/)
-      await ui.press({ key: 'aaaa-1111|org-a' } as never)
-      expect((await row('aaaa-1111|org-a'))?.text).toMatch(/\[model: ask first, enforced\]/)
+      expect((await row('aaaa-1111|org-a'))?.text).toMatch(/\[model: never, enforced\]/)
+      expect(seen.toasts.some(t => t.includes('never-switch list'))).toBe(true)
       await ui.unmount()
     }
   })
@@ -745,7 +720,7 @@ describe('managing accounts in the pane', () => {
     expect(seen.toasts.some(t => t.includes('the label "alice" is taken'))).toBe(true)
     expect(file(seen, `${STORE}/bbbb-2222.json`).label).toBe('home')
 
-    // Switch: the user's own, no dialog even though the account is "ask first".
+    // Switch: the user's own, no dialog.
     await ui.press({ key: 'switch:bbbb-2222|org-b' } as never)
     expect(seen.questions).toEqual([])
     expect(file(seen, CREDS).claudeAiOauth.accessToken).toBe('at-b1')
@@ -776,13 +751,13 @@ describe('managing accounts in the pane', () => {
 })
 
 describe('languages', () => {
-  test('German: /account, the dialog and the pane speak German; the model still reads English', { options: { language: 'de' } }, async ($, on) => {
+  test('German: /account and the pane speak German; the model still reads English', { options: { language: 'de' } }, async ($, on) => {
     const { seen } = world(on)
     saveB(seen, tokens('b1'), false)
     await $.session.start({ cwd: '/' } as never)
     const list = await command($, 'list')
     expect(list).toContain('Accounts: 2 gespeichert · aktiv: alice (alice@work.example')
-    expect(list).toContain('KI fragt erst')
+    expect(list).toContain('KI darf hierher wechseln')
     expect(list).toMatch(/5-Stunden 91 ?% \(Reset in 2 Std\. 0 Min\.\)/)
     expect(list).toContain('Die KI wechselt von selbst zu Accounts mit')
 
@@ -791,10 +766,9 @@ describe('languages', () => {
     expect(forModel).toContain('Accounts: 2 saved · active:')
     expect(forModel).toContain('You may switch on your own')
 
-    // The dialog asks in German, and its German "Switch" switches.
-    seen.answer = 'Wechseln'
+    // The model's switch goes through at once; the toast is German.
     const r = await call($, 'switch', { account: 'private', reason: '5h voll' })
-    expect(seen.questions[0]).toBe('Den Claude-Account zu private (alice@home.example · Alice) wechseln? Angegebener Grund: 5h voll')
+    expect(seen.questions).toEqual([])
     expect(r.deny).toBeUndefined()
     expect(String(r.result)).toContain('Switched from') // the model's answer: English
     expect(seen.toasts).toContain('Account: gewechselt zu private (durch die KI)')
@@ -815,7 +789,7 @@ describe('languages', () => {
       surface: 'desktop',
       props: { title: 'Comptes', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
     } as never)
-    expect((await ui.find({ type: 'Button', key: 'bbbb-2222|org-b' } as never) as { text?: string })?.text).toContain('[IA : demander d’abord]')
+    expect((await ui.find({ type: 'Button', key: 'bbbb-2222|org-b' } as never) as { text?: string })?.text).toContain('[IA : changer librement]')
     expect((await ui.find({ type: 'Button', key: 'switch:bbbb-2222|org-b' } as never) as { text?: string })?.text).toBe('Passer ici')
     expect(await ui.find({ type: 'Text', text: /Tab \/ flèches/ } as never)).toBeTruthy()
     await ui.unmount()

@@ -1,10 +1,11 @@
 // What the account settings pane draws: one row per saved account.
-// level: what the model may do – switch on its own, ask first, or not at all.
+// level: what the model may do – switch on its own or not at all.
 export type AccountRow = {
   key: string
   name: string
   who: string
-  level: 'allow' | 'ask' | 'block'
+  level: 'allow' | 'block'
+  // The neverSwitch option pins it to block.
   enforced: boolean
   active: boolean
   limits: string

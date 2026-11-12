@@ -31,18 +31,15 @@ const en = {
 
   // Levels
   levelAllow: 'switch freely',
-  levelAsk: 'ask first',
   levelBlock: 'never',
   listMayNot: 'model may NOT switch here',
-  listAsksEnforced: 'model asks first (enforced)',
+  listMayNotEnforced: 'model may NOT switch here (enforced)',
   listMay: 'model may switch here',
-  listAsks: 'model asks first',
-  alwaysAskRefused: (who: Who) =>
-    `${who} is on the always-ask list (option alwaysAsk): the model must ask you before it switches there, and that ` +
+  neverSwitchRefused: (who: Who) =>
+    `${who} is on the never-switch list (option neverSwitch): the model may not switch there, and that ` +
     'cannot be lifted here. Change the option (or, if your organization set it, ask them).',
   nowAllow: (who: Who) => `The model may now switch to ${who} on its own.`,
-  nowAsk: (who: Who) => `The model now asks you before it switches to ${who}.`,
-  nowBlock: (who: Who) => `The model may no longer switch to ${who} at all, not even by asking. You still can (/account switch).`,
+  nowBlock: (who: Who) => `The model may no longer switch to ${who} at all. You still can (/account switch).`,
 
   // Managing
   removeActive: (who: Who) => `${who} is the active account and would be saved again at once (autoSave). Switch away first.`,
@@ -67,7 +64,7 @@ const en = {
   onlyOne: 'Only one account saved: switching needs another (sign in with it via /login – it is saved on its own – then come back).',
   userModelMay: (cooldown: number) =>
     `The model may switch on its own to accounts marked "model may switch here"${cooldown > 0 ? ` (at most every ${cooldown} min)` : ''}, ` +
-    'asks you first for the others, and never switches to one marked "model may NOT switch here".',
+    'and never to one marked "model may NOT switch here".',
   userModelMayNot: 'The model may not switch accounts on its own (/account auto on allows it).',
 
   // Switching
@@ -89,13 +86,8 @@ const en = {
   toastSwitched: (name: string, byModel: boolean) => `Account: switched to ${name}${byModel ? ' (by the model)' : ''}`,
   toastRecordFixed: (name: string) => `Account: ~/.claude.json named another account than the login – set back to ${name}`,
 
-  // The dialog the model's switch opens
-  askHeader: 'Account',
-  askQuestion: (who: Who, reason: string) => `Switch the Claude account to ${who}? Reason given: ${reason}`,
-  askSwitch: 'Switch',
-  askSwitchHint: 'Switch now; every Claude Code session on this machine follows.',
-  askStay: 'Don’t switch',
-  askStayHint: 'Stay on the current account.',
+  // The toasts' header
+  toastHeader: 'Account',
 
   // Notes
   noteLine: (note: string, byModel: boolean) => `Note${byModel ? ' (by the model)' : ''}: ${note}`,
@@ -118,7 +110,7 @@ const en = {
   paneReallyRemove: 'Really remove? Press again',
   paneName: 'Name',
   paneRename: 'Rename',
-  paneLegend: 'model: switch freely = at once · ask first = a dialog asks you · never = only you can switch there',
+  paneLegend: 'model: switch freely = it may switch there on its own · never = only you can switch there',
   paneReading: 'Account: reading every account’s limits …',
   paneRead: 'Account: limits read',
   paneGone: 'already gone',
@@ -127,7 +119,7 @@ const en = {
 
   // /account
   usage:
-    'Usage: /account (the pane) · /account [list|usage|where] · /account allow|ask|block <name> · /account note <name> [text] · /account save [label] · /account switch <name> · /account label <name> <label> · /account remove <name> · /account auto on|off|default',
+    'Usage: /account (the pane) · /account [list|usage|where] · /account allow|block <name> · /account note <name> [text] · /account save [label] · /account switch <name> · /account label <name> <label> · /account remove <name> · /account auto on|off|default',
   autoState: (may: boolean) => `The model may switch on its own: ${may ? 'yes' : 'no'}.`,
   autoChanged: (may: boolean) => `The model may switch accounts on its own: ${may ? 'yes' : 'no'}.`,
   failed: (why: string) => `Account switcher: ${why}`,
@@ -180,18 +172,15 @@ const de: Partial<Messages> = {
   labelTaken: (label, other) => `Der Name „${label}“ ist schon vergeben an ${other} – nimm einen anderen oder benenne den erst um`,
 
   levelAllow: 'frei wechseln',
-  levelAsk: 'erst fragen',
   levelBlock: 'nie',
   listMayNot: 'KI darf NICHT hierher wechseln',
-  listAsksEnforced: 'KI fragt erst (erzwungen)',
+  listMayNotEnforced: 'KI darf NICHT hierher wechseln (erzwungen)',
   listMay: 'KI darf hierher wechseln',
-  listAsks: 'KI fragt erst',
-  alwaysAskRefused: who =>
-    `${who} steht auf der Immer-fragen-Liste (Option alwaysAsk): Die KI muss dich fragen, bevor sie dorthin wechselt, ` +
+  neverSwitchRefused: who =>
+    `${who} steht auf der Nie-wechseln-Liste (Option neverSwitch): Die KI darf nicht dorthin wechseln, ` +
     'und das lässt sich hier nicht aufheben. Ändere die Option (oder frag deine Organisation, falls sie sie gesetzt hat).',
   nowAllow: who => `Die KI darf jetzt von selbst zu ${who} wechseln.`,
-  nowAsk: who => `Die KI fragt dich jetzt, bevor sie zu ${who} wechselt.`,
-  nowBlock: who => `Die KI darf gar nicht mehr zu ${who} wechseln, auch nicht auf Nachfrage. Du selbst kannst es weiterhin (/account switch).`,
+  nowBlock: who => `Die KI darf gar nicht mehr zu ${who} wechseln. Du selbst kannst es weiterhin (/account switch).`,
 
   removeActive: who => `${who} ist der aktive Account und würde sofort wieder gespeichert (autoSave). Wechsle erst weg.`,
   removeFailed: (path, why) => `Konnte ${path} nicht entfernen: ${why}`,
@@ -214,7 +203,7 @@ const de: Partial<Messages> = {
   onlyOne: 'Nur ein Account gespeichert: Zum Wechseln braucht es einen zweiten (mit /login anmelden – er wird von selbst gespeichert).',
   userModelMay: cooldown =>
     `Die KI wechselt von selbst zu Accounts mit „KI darf hierher wechseln“${cooldown > 0 ? ` (höchstens alle ${cooldown} Min.)` : ''}, ` +
-    'fragt dich bei den anderen vorher und wechselt nie zu einem mit „KI darf NICHT hierher wechseln“.',
+    'und nie zu einem mit „KI darf NICHT hierher wechseln“.',
   userModelMayNot: 'Die KI darf nicht von selbst wechseln (/account auto on erlaubt es).',
 
   already: who => `Schon auf ${who} – nichts zu wechseln.`,
@@ -235,12 +224,7 @@ const de: Partial<Messages> = {
   toastSwitched: (name, byModel) => `Account: gewechselt zu ${name}${byModel ? ' (durch die KI)' : ''}`,
   toastRecordFixed: name => `Account: ~/.claude.json nannte einen anderen Account als der Login – auf ${name} zurückgesetzt`,
 
-  askHeader: 'Account',
-  askQuestion: (who, reason) => `Den Claude-Account zu ${who} wechseln? Angegebener Grund: ${reason}`,
-  askSwitch: 'Wechseln',
-  askSwitchHint: 'Jetzt wechseln; alle Claude-Code-Sitzungen auf diesem Rechner folgen.',
-  askStay: 'Nicht wechseln',
-  askStayHint: 'Beim aktuellen Account bleiben.',
+  toastHeader: 'Account',
 
   noteLine: (note, byModel) => `Notiz${byModel ? ' (von der KI)' : ''}: ${note}`,
   noteSet: who => `Notiz für ${who} gespeichert.`,
@@ -261,7 +245,7 @@ const de: Partial<Messages> = {
   paneReallyRemove: 'Wirklich entfernen? Noch einmal drücken',
   paneName: 'Name',
   paneRename: 'Umbenennen',
-  paneLegend: 'KI: frei wechseln = sofort · erst fragen = ein Dialog fragt dich · nie = nur du kannst dorthin wechseln',
+  paneLegend: 'KI: frei wechseln = sie darf von selbst dorthin wechseln · nie = nur du kannst dorthin wechseln',
   paneReading: 'Account: lese die Limits aller Accounts …',
   paneRead: 'Account: Limits gelesen',
   paneGone: 'schon weg',
@@ -269,7 +253,7 @@ const de: Partial<Messages> = {
   settingsOpened: 'Account-Einstellungen geöffnet: Tab oder Pfeile wechseln den Account, Enter ändert, was die KI darf, Esc schließt.',
 
   usage:
-    'Verwendung: /account (das Fenster) · /account [list|usage|where] · /account allow|ask|block <Name> · /account note <Name> [Text] · /account save [Name] · /account switch <Name> · /account label <Name> <neuer Name> · /account remove <Name> · /account auto on|off|default',
+    'Verwendung: /account (das Fenster) · /account [list|usage|where] · /account allow|block <Name> · /account note <Name> [Text] · /account save [Name] · /account switch <Name> · /account label <Name> <neuer Name> · /account remove <Name> · /account auto on|off|default',
   autoState: may => `Die KI darf von selbst wechseln: ${may ? 'ja' : 'nein'}.`,
   autoChanged: may => `Die KI darf Accounts von selbst wechseln: ${may ? 'ja' : 'nein'}.`,
   failed: why => `Account-Switcher: ${why}`,
@@ -319,18 +303,15 @@ const fr: Partial<Messages> = {
   labelTaken: (label, other) => `le nom « ${label} » est déjà pris par ${other} – choisis-en un autre, ou renomme d’abord celui-là`,
 
   levelAllow: 'changer librement',
-  levelAsk: 'demander d’abord',
   levelBlock: 'jamais',
   listMayNot: 'l’IA ne peut PAS passer ici',
-  listAsksEnforced: 'l’IA demande d’abord (imposé)',
+  listMayNotEnforced: 'l’IA ne peut PAS passer ici (imposé)',
   listMay: 'l’IA peut passer ici',
-  listAsks: 'l’IA demande d’abord',
-  alwaysAskRefused: who =>
-    `${who} est sur la liste « toujours demander » (option alwaysAsk) : l’IA doit te demander avant d’y passer, et cela ` +
+  neverSwitchRefused: who =>
+    `${who} est sur la liste « jamais » (option neverSwitch) : l’IA ne peut pas y passer, et cela ` +
     'ne peut pas être levé ici. Change l’option (ou, si ton organisation l’a fixée, demande-lui).',
   nowAllow: who => `L’IA peut maintenant passer seule à ${who}.`,
-  nowAsk: who => `L’IA te demande maintenant avant de passer à ${who}.`,
-  nowBlock: who => `L’IA ne peut plus du tout passer à ${who}, même en demandant. Toi, tu le peux toujours (/account switch).`,
+  nowBlock: who => `L’IA ne peut plus du tout passer à ${who}. Toi, tu le peux toujours (/account switch).`,
 
   removeActive: who => `${who} est le compte actif et serait aussitôt réenregistré (autoSave). Change d’abord de compte.`,
   removeFailed: (path, why) => `Impossible de supprimer ${path} : ${why}`,
@@ -353,7 +334,7 @@ const fr: Partial<Messages> = {
   onlyOne: 'Un seul compte enregistré : il en faut un autre pour changer (connecte-toi avec via /login – il est enregistré tout seul).',
   userModelMay: cooldown =>
     `L’IA passe seule aux comptes marqués « l’IA peut passer ici »${cooldown > 0 ? ` (au plus toutes les ${cooldown} min)` : ''}, ` +
-    'te demande d’abord pour les autres, et ne passe jamais à un compte marqué « l’IA ne peut PAS passer ici ».',
+    'et jamais à un compte marqué « l’IA ne peut PAS passer ici ».',
   userModelMayNot: 'L’IA ne peut pas changer de compte seule (/account auto on l’autorise).',
 
   already: who => `Déjà sur ${who} – rien à changer.`,
@@ -374,12 +355,7 @@ const fr: Partial<Messages> = {
   toastSwitched: (name, byModel) => `Compte : passé à ${name}${byModel ? ' (par l’IA)' : ''}`,
   toastRecordFixed: name => `Compte : ~/.claude.json indiquait un autre compte que la connexion – remis sur ${name}`,
 
-  askHeader: 'Compte',
-  askQuestion: (who, reason) => `Passer le compte Claude à ${who} ? Raison donnée : ${reason}`,
-  askSwitch: 'Changer',
-  askSwitchHint: 'Changer maintenant ; toutes les sessions Claude Code de cette machine suivent.',
-  askStay: 'Ne pas changer',
-  askStayHint: 'Rester sur le compte actuel.',
+  toastHeader: 'Compte',
 
   noteLine: (note, byModel) => `Note${byModel ? ' (par l’IA)' : ''} : ${note}`,
   noteSet: who => `Note enregistrée pour ${who}.`,
@@ -400,7 +376,7 @@ const fr: Partial<Messages> = {
   paneReallyRemove: 'Vraiment supprimer ? Appuie encore',
   paneName: 'Nom',
   paneRename: 'Renommer',
-  paneLegend: 'IA : changer librement = tout de suite · demander d’abord = une boîte de dialogue te demande · jamais = toi seul peux y passer',
+  paneLegend: 'IA : changer librement = elle peut y passer seule · jamais = toi seul peux y passer',
   paneReading: 'Compte : lecture des limites de tous les comptes …',
   paneRead: 'Compte : limites lues',
   paneGone: 'déjà supprimé',
@@ -408,7 +384,7 @@ const fr: Partial<Messages> = {
   settingsOpened: 'Réglages des comptes ouverts : Tab ou les flèches changent de compte, Entrée change ce que l’IA peut faire, Échap ferme.',
 
   usage:
-    'Utilisation : /account (le panneau) · /account [list|usage|where] · /account allow|ask|block <nom> · /account note <nom> [texte] · /account save [nom] · /account switch <nom> · /account label <nom> <nouveau nom> · /account remove <nom> · /account auto on|off|default',
+    'Utilisation : /account (le panneau) · /account [list|usage|where] · /account allow|block <nom> · /account note <nom> [texte] · /account save [nom] · /account switch <nom> · /account label <nom> <nouveau nom> · /account remove <nom> · /account auto on|off|default',
   autoState: may => `L’IA peut changer seule : ${may ? 'oui' : 'non'}.`,
   autoChanged: may => `L’IA peut changer de compte seule : ${may ? 'oui' : 'non'}.`,
   failed: why => `Account switcher : ${why}`,

@@ -62,10 +62,10 @@ type AccountFile = {
   lastUsage?: Usage
   // Its refresh token was refused: only a new /login with it brings it back.
   needsLogin?: boolean
-  // On the allow list: the model may switch to it on its own. Otherwise it may only ask,
-  // and the user confirms in a dialog the plugin opens.
+  // Gone with 0.11: it marked the allow list, back when the model had to ask for the others.
+  // Every account not blocked is allowed now; the field is dropped on the next write.
   autoSwitch?: boolean
-  // Excluded: the model may not switch to it at all, not even by asking. The user still can.
+  // Excluded: the model may not switch to it at all. The user still can.
   modelBlocked?: boolean
   // What the user (or a model) wants kept in mind for this account, e.g. "weekends only".
   // A hint only: the plugin shows it everywhere the account is named, it enforces nothing.
@@ -121,7 +121,7 @@ let cooldownMs = 5 * MINUTE
 let autoSave = true
 let configuredStoreDir = ''
 let configuredKeychain = ''
-let alwaysAsk: string[] = [] // emails, @domains or organization names, lower case
+let neverSwitch: string[] = [] // emails, @domains or organization names, lower case
 let configuredLanguage = 'auto'
 let userLang: Lang = 'en' // what the person reads; the model reads English
 let settings: Settings | null = null
@@ -469,7 +469,6 @@ function accountFrom(oauthAccount: Record<string, unknown>, tokens: OAuthTokens,
     oauthAccount,
     claudeAiOauth: tokens,
     ...(before?.lastUsage ? { lastUsage: before.lastUsage } : {}),
-    ...(before?.autoSwitch ? { autoSwitch: true } : {}),
     ...(before?.modelBlocked ? { modelBlocked: true } : {}),
     ...(before?.note ? { note: before.note, noteBy: before.noteBy ?? 'user', noteAt: before.noteAt ?? at } : {}),
   }
@@ -579,13 +578,13 @@ async function ensureLabels($: EngineInterface, accounts: Account[]): Promise<vo
   }
 }
 
-// On the alwaysAsk list (the userConfig option, which managed settings can pin): the model
-// must ask before switching there, whatever the account's own setting says.
-function mustAsk(a: AccountFile): boolean {
+// On the neverSwitch list (the userConfig option, which managed settings can pin; the old
+// alwaysAsk counts too): the model may not switch there, whatever the account's own setting says.
+function enforcedBlock(a: AccountFile): boolean {
   const email = a.email?.toLowerCase() ?? ''
   const org = a.organizationName?.toLowerCase() ?? ''
   const orgId = a.organizationUuid?.toLowerCase() ?? ''
-  return alwaysAsk.some(x => (x.startsWith('@') ? email.endsWith(x) : x === email || x === org || x === orgId))
+  return neverSwitch.some(x => (x.startsWith('@') ? email.endsWith(x) : x === email || x === org || x === orgId))
 }
 
 // A label names one account: refused where another saved account carries it already.
@@ -779,7 +778,7 @@ function fmtLimits(u: Usage | null, at: number, lang: Lang = 'en'): string {
 // The account with the most room: neither limit near full, the lowest 5-hour use first.
 function bestOther(readings: Reading[], activeUuid: string | null, at: number): Reading | null {
   const candidates = readings.filter(
-    r => keyOfFile(r.account.data) !== activeUuid && r.usage && !isFull(r.usage, at) && !r.account.data.needsLogin && !r.account.data.modelBlocked,
+    r => keyOfFile(r.account.data) !== activeUuid && r.usage && !isFull(r.usage, at) && !r.account.data.needsLogin && levelOf(r.account.data) !== 'block',
   )
   candidates.sort((a, b) => {
     const p = (r: Reading, k: LimitKind) => percentNow(limitOf(r.usage, k), at) ?? 0
@@ -793,32 +792,31 @@ function bestOther(readings: Reading[], activeUuid: string | null, at: number): 
 type Level = AccountRow['level']
 
 function levelOf(a: AccountFile): Level {
-  return a.modelBlocked ? 'block' : a.autoSwitch && !mustAsk(a) ? 'allow' : 'ask'
+  // There is no "ask first" any more: an account the model used to have to ask for is allowed.
+  return a.modelBlocked || enforcedBlock(a) ? 'block' : 'allow'
 }
 
-// Sets what the model may do for one account; refuses `allow` on the alwaysAsk list.
+// Sets what the model may do for one account; refuses `allow` on the neverSwitch list.
 // Answers what changed, in a sentence, or the refusal.
 async function setLevel($: EngineInterface, account: Account, level: Level, lang: Lang = 'en'): Promise<{ text: string; refused?: true }> {
-  if (level === 'allow' && mustAsk(account.data)) return { refused: true, text: msg(lang, 'alwaysAskRefused')(describe(account.data)) }
-  account.data.autoSwitch = level === 'allow'
+  if (level === 'allow' && enforcedBlock(account.data)) return { refused: true, text: msg(lang, 'neverSwitchRefused')(describe(account.data)) }
+  delete account.data.autoSwitch
   account.data.modelBlocked = level === 'block'
   await writeAccount($, account)
-  const key = level === 'allow' ? 'nowAllow' : level === 'ask' ? 'nowAsk' : 'nowBlock'
-  return { text: msg(lang, key)(describe(account.data)) }
+  return { text: msg(lang, level === 'allow' ? 'nowAllow' : 'nowBlock')(describe(account.data)) }
 }
 
-// Enter on a row: on to the next level, past `allow` where asking is enforced.
-function nextLevel(level: Level, enforced: boolean): Level {
-  const order: Level[] = enforced ? ['ask', 'block'] : ['allow', 'ask', 'block']
-  return order[(order.indexOf(level) + 1) % order.length] ?? 'ask'
+// Enter on a row: switch freely <-> never.
+function nextLevel(level: Level): Level {
+  return level === 'allow' ? 'block' : 'allow'
 }
 
 function levelText(level: Level, lang: Lang): string {
-  return msg(lang, level === 'allow' ? 'levelAllow' : level === 'ask' ? 'levelAsk' : 'levelBlock')
+  return msg(lang, level === 'allow' ? 'levelAllow' : 'levelBlock')
 }
 
 const PANE = 'account-switcher'
-const rows = atom({ plugin: 'account-switcher', key: 'rows' } as const, [] as AccountRow[], { shape: 'rows-2' })
+const rows = atom({ plugin: 'account-switcher', key: 'rows' } as const, [] as AccountRow[], { shape: 'rows-3' })
 const pendingRemove = atom({ plugin: 'account-switcher', key: 'pendingRemove' } as const, '', { shape: 'pending-1' })
 
 // What the pane draws, from the account files (their last readings: no server request).
@@ -833,7 +831,7 @@ async function refreshRows($: EngineInterface): Promise<void> {
     name: shortName(a.data),
     who: [a.data.email, a.data.organizationName, a.data.subscriptionType].filter(Boolean).join(' · '),
     level: levelOf(a.data),
-    enforced: mustAsk(a.data),
+    enforced: enforcedBlock(a.data),
     active: keyOfFile(a.data) === activeKey,
     limits:
       (a.data.lastUsage ? fmtLimits(a.data.lastUsage, at, userLang) : msg(userLang, 'limitsNotRead')) +
@@ -994,7 +992,7 @@ async function overview($: EngineInterface, { refresh, forModel = false }: { ref
     // Every line starts with a glyph: Claude Code shifts lines that start with spaces.
     const mark = keyOfFile(d) === activeUuid ? '▶' : '○'
     const facts = [d.email, d.displayName, d.organizationName, d.subscriptionType].filter(Boolean).join(' · ')
-    const allow = t(d.modelBlocked ? 'listMayNot' : mustAsk(d) ? 'listAsksEnforced' : d.autoSwitch ? 'listMay' : 'listAsks')
+    const allow = t(levelOf(d) === 'allow' ? 'listMay' : enforcedBlock(d) ? 'listMayNotEnforced' : 'listMayNot')
     lines.push(`${mark} ${i + 1}. ${d.label ? `${d.label} – ` : ''}${facts || d.accountUuid} · ${allow}`)
     let detail = `└ ${fmtLimits(r.usage, at, lang)}`
     if (r.usage && isFull(r.usage, at)) detail += ` · ${t('full')}`
@@ -1021,7 +1019,6 @@ async function overview($: EngineInterface, { refresh, forModel = false }: { ref
   lines.push(
     may
       ? `You may switch on your own to accounts marked "model may switch here" (${T_SWITCH}${cooldownMs > 0 ? `, at most every ${cooldownMs / MINUTE} min` : ''}); ` +
-          `to one marked "model asks first", ${T_SWITCH} puts the switch to the user in a dialog and switches only if they confirm; ` +
           'to one marked "model may NOT switch here" never (only the user can, with /account switch).'
       : 'The user has NOT allowed you to switch on your own: suggest a switch to them instead (/account switch <name>).',
   )
@@ -1164,7 +1161,7 @@ function tellModel($: EngineInterface, text: string): Promise<unknown> {
 }
 
 function levelForModel(a: AccountFile): string {
-  return a.modelBlocked ? 'you may NOT switch here' : mustAsk(a) || !a.autoSwitch ? 'you ask the user first' : 'you may switch here on your own'
+  return levelOf(a) === 'block' ? 'you may NOT switch here' : 'you may switch here on your own'
 }
 
 // ~/.claude.json names the active account, and every switch writes it – this session's,
@@ -1217,7 +1214,7 @@ const BRIEFING = [
   '# Account switcher',
   'The user keeps several Claude accounts; the account-switcher plugin can switch this session (and every Claude Code session on this machine) between them in seconds, without a restart.',
   `- ${T_ACCOUNTS}: the saved accounts (label, email, name, organization, plan), which is active, and each one's 5-hour and 7-day limits – read from the server without switching; refresh=true reads them anew.`,
-  `- ${T_SWITCH}: switches to another saved account from your next request on (needs "account" and a short "reason"). Only while the user lets you – ${T_ACCOUNTS} says whether. To an account on the user's allow list ("model may switch here") it switches at once, not more often than the cooldown; to one marked "model asks first" it first asks the user in a dialog and switches only if they confirm – a "no" is final for now, do not ask again right away; to one marked "model may NOT switch here" you may not switch at all – do not try or ask, suggest it to the user if it is the only one with room.`,
+  `- ${T_SWITCH}: switches to another saved account from your next request on (needs "account" and a short "reason"). Only while the user lets you – ${T_ACCOUNTS} says whether. To an account marked "model may switch here" it switches at once, not more often than the cooldown; to one marked "model may NOT switch here" you may not switch at all – do not try, suggest it to the user if it is the only one with room.`,
   `- ${T_SAVE}: saves the account signed in now (normally that happens on its own).`,
   `- ${T_NOTE}: reads or sets an account's note. ${NOTES_RULE} Change a note only when the user asks you to or agrees; they are told when you do.`,
   '- When the active account changes outside your own switches (another Claude Code session, a /login), you are told in a message, with the new account\'s limits, your level there and its note.',
@@ -1235,7 +1232,11 @@ export const register: Register = (on, options) => {
   configuredKeychain = String(options.keychainService ?? '').trim()
   configuredLanguage = String(options.language ?? 'auto').trim().toLowerCase() || 'auto'
   userLang = 'en'
-  alwaysAsk = String(options.alwaysAsk ?? '')
+  // alwaysAsk is the option's name before 0.11, when the model could still ask: its
+  // accounts are now ones the model may not switch to (an organization's list stays a limit).
+  neverSwitch = [options.neverSwitch, options.alwaysAsk]
+    .map(x => String(x ?? ''))
+    .join(',')
     .split(/[,;\n]/)
     .map(x => x.trim().toLowerCase())
     .filter(Boolean)
@@ -1268,8 +1269,8 @@ export const register: Register = (on, options) => {
       description:
         'Account switcher: switches Claude Code to another saved account, effective from your next request – no restart. ' +
         'The current account\'s login is saved first. Only while the user lets you (see ' +
-        `${T_ACCOUNTS}). An account on the user\'s allow list is switched to at once (at most every ${cooldownMs / MINUTE} min); ` +
-        'for any other the user is asked in a dialog first and decides. Use it to go on working when the ' +
+        `${T_ACCOUNTS}). An account the user has not excluded is switched to at once (at most every ${cooldownMs / MINUTE} min); ` +
+        'one they excluded is refused. Use it to go on working when the ' +
         'active account\'s limits run high and another has room. It switches every Claude Code session on this machine.',
       inputSchema: {
         type: 'object',
@@ -1313,8 +1314,8 @@ export const register: Register = (on, options) => {
     await safe(() =>
       $.command.register({
         name: 'account',
-        description: 'Claude accounts: /account opens the settings pane · list (as text) · switch <name> · allow|ask|block <name> · note <name> [text] · save [label] · label <name> <label> · remove <name> · auto on|off · where',
-        argumentHint: '[list|settings|switch|allow|ask|block|note|save|label|remove|auto|where] …',
+        description: 'Claude accounts: /account opens the settings pane · list (as text) · switch <name> · allow|block <name> · note <name> [text] · save [label] · label <name> <label> · remove <name> · auto on|off · where',
+        argumentHint: '[list|settings|switch|allow|block|note|save|label|remove|auto|where] …',
       }),
     )
     await ensureSettings($)
@@ -1386,44 +1387,17 @@ export const register: Register = (on, options) => {
     await ensureLabels($, accounts)
     const target = findAccount(accounts, account)
     if ('error' in target) return { deny: `Account switcher: ${target.error}` }
-    if (target.data.modelBlocked) {
+    if (levelOf(target.data) === 'block') {
       return {
         deny:
-          `Account switcher: the user has excluded ${describe(target.data)} from switches by you – you may not switch there, ` +
-          `and do not ask for it. Only the user can switch there (/account switch ${shortName(target.data)}). ` +
+          `Account switcher: the user has excluded ${describe(target.data)} from switches by you – you may not switch there. ` +
+          `Only the user can switch there (/account switch ${shortName(target.data)}). ` +
           'Pick another account, or go on on the current one or pause as CTM asks.',
       }
     }
-    if (target.data.autoSwitch && !mustAsk(target.data)) {
-      const at = await now($)
-      if (at - lastModelSwitchAt < cooldownMs) {
-        return { deny: `Account switcher: you switched ${fmtSpan(lastModelSwitchAt, at)} ago – wait ${fmtSpan(at, lastModelSwitchAt + cooldownMs)} more (no switching back and forth).` }
-      }
-    } else {
-      // Not on the allow list: the user decides, in a dialog this plugin opens – the
-      // model cannot answer it, and no permission mode or classifier settles it.
-      const live = await safe(() => readLive($))
-      if (live && keyOf(live.oauthAccount) === keyOfFile(target.data)) return { result: `Already on ${describe(target.data)} – nothing to switch.` }
-      const u = <K extends Parameters<typeof msg>[1]>(key: K) => msg(userLang, key)
-      let answer: string | undefined
-      try {
-        answer = await $.ui.ask(u('askQuestion')(describe(target.data), reason), {
-          header: u('askHeader'),
-          options: [
-            { label: u('askSwitch'), description: u('askSwitchHint') },
-            { label: u('askStay'), description: u('askStayHint') },
-          ],
-        } as never)
-      } catch {
-        answer = undefined
-      }
-      if (answer !== u('askSwitch')) {
-        return {
-          deny:
-            `Account switcher: the user did not confirm the switch to ${describe(target.data)}${answer ? ` (answer: ${answer})` : ''}. ` +
-            'Do not ask again for this right away; go on on the current account or pause as CTM asks.',
-        }
-      }
+    const at = await now($)
+    if (at - lastModelSwitchAt < cooldownMs) {
+      return { deny: `Account switcher: you switched ${fmtSpan(lastModelSwitchAt, at)} ago – wait ${fmtSpan(at, lastModelSwitchAt + cooldownMs)} more (no switching back and forth).` }
     }
     try {
       return { result: await switchTo($, keyOfFile(target.data), { by: 'model', reason }) }
@@ -1467,16 +1441,16 @@ export const register: Register = (on, options) => {
     const u = <K extends Parameters<typeof msg>[1]>(key: K) => msg(userLang, key)
     const pending = await read($, pendingRemove)
     const find = async (key: string) => (await listAccounts($)).find(a => keyOfFile(a.data) === key)
-    const say = (text: string) => toast($, `${u('askHeader')}: ${text}`)
+    const say = (text: string) => toast($, `${u('toastHeader')}: ${text}`)
     const change = (row: AccountRow) => async () => {
       const account = await find(row.key)
       if (account) {
-        const level = nextLevel(levelOf(account.data), mustAsk(account.data))
+        const level = nextLevel(levelOf(account.data))
         const r = await setLevel($, account, level, userLang)
         if (r.refused) say(r.text)
         else {
-          // The model is told, as after /account allow|ask|block.
-          const forModel = msg('en', level === 'allow' ? 'nowAllow' : level === 'ask' ? 'nowAsk' : 'nowBlock')(describe(account.data))
+          // The model is told, as after /account allow|block.
+          const forModel = msg('en', level === 'allow' ? 'nowAllow' : 'nowBlock')(describe(account.data))
           await tellModel($, `[The user changed this in the account settings pane.] ${forModel}`)
         }
       }
@@ -1534,7 +1508,7 @@ export const register: Register = (on, options) => {
               {row.active ? '▶ ' : '○ '}
               {row.name} <Text dimColor>{row.who}</Text>
               {'  '}
-              <Text bold>{u('paneModel')(levelText(row.level, userLang), row.enforced && row.level === 'ask')}</Text>
+              <Text bold>{u('paneModel')(levelText(row.level, userLang), row.enforced)}</Text>
             </Button>
             <Text dimColor>└ {row.limits}</Text>
             {row.note && <Text>└ {u('noteLine')(row.note, row.noteByModel)}</Text>}
@@ -1643,7 +1617,6 @@ export const register: Register = (on, options) => {
           return { text: await removeAccount($, found, lang) }
         }
         case 'allow':
-        case 'ask':
         case 'block': {
           const accounts = await listAccounts($)
           await ensureLabels($, accounts)
@@ -1652,7 +1625,7 @@ export const register: Register = (on, options) => {
           const level = verb.toLowerCase() as Level
           const r = await setLevel($, found, level, lang)
           if (r.refused) return { text: r.text }
-          const forModel = msg('en', level === 'allow' ? 'nowAllow' : level === 'ask' ? 'nowAsk' : 'nowBlock')(describe(found.data))
+          const forModel = msg('en', level === 'allow' ? 'nowAllow' : 'nowBlock')(describe(found.data))
           return { text: r.text, context: [`The user changed this with /account ${verb}: ${forModel}`] }
         }
         // /account alone opens the pane; where nothing can draw it, the list instead.

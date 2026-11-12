@@ -95,9 +95,8 @@ for 3 minutes, and `refresh` reads again (at most every 30 s per account).
   the model names by label, email, display name, its number in the list, or uuid. The model can
   only switch:
   - while you allow it (option `allowModelSwitch`, or `/account auto on|off`; on by default),
-  - to an account on your **allow list** at once, at most once every `switchCooldownMinutes`
-    (default 5), so it doesn't switch back and forth,
-  - to any other account only after **you confirm it** in a dialog the plugin opens (see below),
+  - to an account you have not excluded (see [Allow list](#allow-list)), at most once every
+    `switchCooldownMinutes` (default 5), so it doesn't switch back and forth,
   - from the main agent, never a subagent,
   - with a `reason`, which shows in the result and as a toast.
 - `mcp__account-switcher__save` `{ label? }`: saves the account Claude Code is signed in with now.
@@ -110,35 +109,36 @@ carries on instead of pausing. If it may not, it tells you which account has roo
 
 ## Allow list
 
-Each account says whether the model may switch to it on its own:
+Each account says whether the model may switch to it on its own. There are two levels:
 
-- **On the list** (`/account allow <name>`): the model switches to it at once when it needs to.
-- **Off the list** (`/account ask <name>`, the default for every new login): the model's `switch`
-  opens a dialog, *"Switch the Claude account to … ? Reason given: …"*, with **Switch** and
-  **Don't switch**. The plugin asks this, not the model, so the model can't answer it, and no
-  permission mode or auto-mode classifier settles it. If you dismiss the dialog, or nobody can be
-  asked (`claude -p`), nothing is switched.
+- **Allowed** (`/account allow <name>`, the default for every new login): the model switches to
+  it at once when it needs to, not more often than the cooldown.
+- **Excluded** (`/account block <name>`): the model may not switch to it at all. Its `switch` is
+  refused with *"the user has excluded … from switches by you"*, and the account is never offered
+  to it as the one with the most room. You can still switch there yourself with
+  `/account switch`. `/account allow` lifts the block.
 
-- **Excluded** (`/account block <name>`): the model may not switch to it at all, not even by
-  asking. Its `switch` is refused with *"the user has excluded … from switches by you"*, no dialog
-  opens, and the account is never offered to it as the one with the most room. You can still
-  switch there yourself with `/account switch`. `/account ask` or `/account allow` lifts the
-  block.
-
-- **Asking enforced** (option `alwaysAsk`): a comma-separated list of emails, domains
-  (`@wemotion.io`) or organization names. For a matching account the model always has to ask,
+- **Excluded, enforced** (option `neverSwitch`): a comma-separated list of emails, domains
+  (`@wemotion.io`) or organization names. The model may never switch to a matching account,
   whatever the account's own setting says, and `/account allow` is refused for it. Because it is
   a plugin option, an organization can pin it in managed settings
-  (`pluginConfigs` → `account-switcher` → `options` → `alwaysAsk`), where neither the user nor the
-  model can change it.
+  (`pluginConfigs` → `account-switcher` → `options` → `neverSwitch`), where neither the user nor
+  the model can change it.
+
+**Upgrading from 0.10 or earlier.** The third level, *ask first* (the model's switch opened a
+dialog for you to confirm), is gone: the question rarely reached anyone. Every account that was
+on *ask first* is now **allowed**; nothing has to be done, the old setting is simply ignored.
+`/account ask` no longer exists. The old option `alwaysAsk` still works, but now means
+`neverSwitch`: a list an organization set to keep the model from switching on its own stays a
+limit rather than turning into a free pass.
 
 **The settings pane.** `/account` (or `/account settings`) opens a pane to manage your accounts. Each account
 shows its short name, email, organization and plan, its last limits, and what the model may do.
 Below that are its buttons:
 
-- **[model: …]**: Enter steps it on, *switch freely → ask first → never*. It skips *switch
-  freely* where asking is enforced.
-- **Switch here**: your own switch, so it never asks. The model is told with its next turn.
+- **[model: …]**: Enter toggles it, *switch freely ↔ never*. Where the block is enforced it
+  stays *never*.
+- **Switch here**: your own switch. The model is told with its next turn.
 - **Remove**: deletes the account's file. The first press asks *Really remove? Press again*.
   The active account has no Remove, because autoSave would save it again at once.
 - **Name**: a text field to rename it. A name another account carries is refused. Mobile draws
@@ -149,15 +149,15 @@ Below that are its buttons:
 At the top, **Read limits anew** asks the server for every account's limits. **Tab** or the
 arrows move between the buttons, **Enter** presses one, and **Esc** closes the pane.
 
-`/account` shows each account as *model may switch here*, *model asks first*, *model asks first
-(enforced)* or *model may NOT switch here*.
+`/account` shows each account as *model may switch here*, *model may NOT switch here* or
+*model may NOT switch here (enforced)*.
 
 **The model can't get around it through the files.** The account files hold every saved login,
 plus the per-account settings. The plugin refuses the model's file tools (Read, Write, Edit, Grep,
 …) aimed into the account store, judged by where the path really leads. It also refuses shell
 commands that name the store. That check is best effort, because a command can name a path in
 many ways. Your own
-`/account switch` never asks. `/account auto off` stops the model switching at all, list or not.
+`/account switch` is never held back. `/account auto off` stops the model switching at all, list or not.
 
 ## Notes per account
 
@@ -215,8 +215,7 @@ organizations. A label another account already carries is refused.
 /account note <name> [text]   set or (no text) remove an account's note
 /account remove <name>        delete an account's file (not the active one)
 /account settings             a pane to manage them: level, switch, rename, remove, read limits
-/account allow <name>         let the model switch to this account on its own
-/account ask <name>           the model asks you before it switches to this account (the default)
+/account allow <name>         let the model switch to this account on its own (the default)
 /account block <name>         the model may never switch to this account (you still can)
 /account auto on|off|default  let the model switch at all, or not
 /account where                where this machine keeps the login, and whether it is consistent
@@ -245,7 +244,7 @@ up elsewhere). Sign in with it again (`/login`), and its file is updated.
 ## Languages
 
 What you read comes in **English, German or French**: `/account` and its subcommands, the
-settings pane, the toasts, and the dialog that asks before a switch. The language is the
+settings pane and the toasts. The language is the
 `language` option if set, else Claude Code's own `language` setting, else the system's (`LANG`,
 `LC_ALL`), and English otherwise. Any text missing in a language falls back to English.
 
@@ -259,7 +258,8 @@ whatever you read.
 |---|---|---|
 | `allowModelSwitch` | true | The model may switch on its own (`/account auto` overrides it, kept across sessions) |
 | `switchCooldownMinutes` | 5 | Minimum time between two switches by the model, 0 = none |
-| `alwaysAsk` | empty | Emails, `@domains` or organization names the model must always ask for (see [Allow list](#allow-list)) |
+| `neverSwitch` | empty | Emails, `@domains` or organization names the model may never switch to (see [Allow list](#allow-list)) |
+| `alwaysAsk` | empty | Old name of `neverSwitch`, read as such (asking is gone since 0.11) |
 | `language` | auto | `auto`, `en`, `de` or `fr`: the language of what you read (see [Languages](#languages)) |
 | `autoSave` | true | Save every new account you sign in with on its own. A saved account's file is always kept current as Claude Code renews its tokens (checked every 5 minutes, and at every switch and session end) |
 | `storeDir` | empty | Folder for the account files; empty = `<config dir>/account-switcher/accounts` |
